@@ -89,11 +89,7 @@ export const FP_BASELINE: FpBaselineEntry[] = [
   // Added with the JS/TS recall phase: the structural JWT check flags hand-rolled payload decoding.
   { file: "src/lib/jwt.ts", id: "jwt-none-alg", lineHash: "ba3a2f2a74f7", line: 14, severity: "critical",
     reason: "Reviewed: decodeJwtPayload is a documented decode-only helper (its header comment says it does NOT verify the signature and must only be used on tokens already verified via supabase.auth.getUser(), to read extra claims such as session_id). It is never used as an authorization decision on its own." },
-  // Added with the Java BOLA PrincipalState work: same known array-index type-inference gap as the entries above.
-  // Added with the GitHub install-return flow (the wizard reads GitHub's ?installation_id=... when the person comes back).
-  { file: "src/app/onboarding/page.tsx", id: "ssrf", lineHash: "febcf18cc92f", line: 115, severity: "critical",
-    reason: "False positive: the request URL is the same-origin relative path /api/github-app/installation?id=<n> (authedFetch sends only to this app's own API, never to another host). The id comes from the address bar (GitHub's installation_id) but is used only after the lines above check it is digits-only (/^\\d+$/), so it cannot change the host or the path. The engine does not treat a regex test as a sanitizer." },
-  { file: "src/components/AuthGuard.tsx", id: "open-redirect", lineHash: "f400a09f622b", line: 35, severity: "medium",
+{ file: "src/components/AuthGuard.tsx", id: "open-redirect", lineHash: "f400a09f622b", line: 35, severity: "medium",
     reason: "False positive: the destination is the fixed same-site path /onboarding; only the current page's own query string (GitHub's installation_id and setup_action) is appended after the `?`, so the host and path cannot be changed by the input. A query string cannot turn a path into an external redirect." },
   { file: "src/app/api/alerts/route.ts", id: "ssrf", lineHash: "9319f55dafca", line: 272, severity: "critical",
     reason: "The URL is a user-configured webhook / alert destination, and delivery goes through isPublicHttpUrl() (lib/outboundUrl.ts, tested in outboundUrl.test.ts) which refuses non-http(s), localhost, private, link-local (cloud metadata) and reserved addresses before every fetch in deliverWebhook / sendSlackAlert / sendTeamsAlert. The engine does not recognise that guard. Known residual: it is a host-name check with no DNS resolution, so a public name that resolves to a private address would pass." },
@@ -127,4 +123,10 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "recordEvent({ kind, message, data }): the logged message is a fixed string (or a short one with a GitHub-signed payload field such as the pull_request action), and the engine taints the whole object literal because one field (an id from the job / webhook) is tainted. lib/logger.ts JSON-encodes the entry in production and strips CR/LF from the message in development, so a line break cannot forge a second log line." },
   { file: "src/app/api/webhooks/route.ts", id: "ssrf", lineHash: "04dea76989b2", line: 60, severity: "critical",
     reason: "The URL is a user-configured webhook / alert destination, and delivery goes through isPublicHttpUrl() (lib/outboundUrl.ts, tested in outboundUrl.test.ts) which refuses non-http(s), localhost, private, link-local (cloud metadata) and reserved addresses before every fetch in deliverWebhook / sendSlackAlert / sendTeamsAlert. The engine does not recognise that guard. Known residual: it is a host-name check with no DNS resolution, so a public name that resolves to a private address would pass." },
+  { file: "src/lib/demoSamples.ts", id: "command-injection", lineHash: "a18ad4078b44", line: 142, severity: "critical",
+    reason: "This line is inside demoSamples.ts's demo fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
+  { file: "src/lib/demoSamples.ts", id: "command-injection", lineHash: "1049f38dc776", line: 166, severity: "critical",
+    reason: "This line is inside demoSamples.ts's demo fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
+  { file: "src/lib/seedFileSamples.ts", id: "command-injection", lineHash: "e5aa10162c73", line: 450, severity: "critical",
+    reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
 ];

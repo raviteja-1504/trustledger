@@ -117,4 +117,7 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/lib/dashboardAggregate.ts", table: "scan_files", op: "select", keys: ["scan_id","risk_score"], why: "parent-verified" },
   { file: "src/lib/opsEvents.ts", table: "ops_events", op: "insert", keys: [], why: "payload-has-org" },
   { file: "src/lib/slaMonitor.ts", table: "violations", op: "select", keys: ["status","sla_deadline"], why: "system-job" },
+  // Evidence routes insert a full EvidenceRecord row; org_id is always set in the evidenceRecordToRow() payload.
+  { file: "src/app/api/evidence/records/route.ts", table: "evidence_log", op: "insert", keys: [], why: "payload-has-org" },
+  { file: "src/app/api/evidence/[id]/route.ts", table: "evidence_log", op: "insert", keys: [], why: "payload-has-org" },
 ];

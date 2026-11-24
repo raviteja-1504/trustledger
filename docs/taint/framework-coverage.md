@@ -128,10 +128,10 @@ unverified here while being tested -- the count is a floor, not a ceiling.
 | phpFrameworkSources | 250 | 81 |
 | rubyFrameworkSources | 157 | 40 |
 | kotlinFrameworkSources | 184 | 45 |
-| rustFrameworkSources | 150 | 33 |
+| rustFrameworkSources | 150 | 34 |
 | cppFrameworkSources | 170 | 41 |
 | frameworkGaps | 28 | 26 |
-| **total** | **1421** | **377** |
+| **total** | **1421** | **378** |
 
 These suites were written alongside the engines and all pass, so on them recall and precision are 100% by construction: they pin
 behaviour (no regression), they do not estimate accuracy on unseen code. Cases whose files are cross-file objects (Java, parts of
@@ -155,7 +155,7 @@ Recall only: the benchmark programs contain vulnerable cases, so it measures wha
 ### Cross-file and interprocedural
 
 - Cross-file baseline: 72 cases across 6 languages (`benchmarks/crossFile`).
-- Interprocedural baseline: 22 cases (`benchmarks/interprocedural`).
+- Interprocedural baseline: 30 cases (`benchmarks/interprocedural`).
 
 ### Precision / recall mini-benchmark (`benchmarks/engineMetrics.test.ts`)
 

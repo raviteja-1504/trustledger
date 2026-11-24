@@ -1209,7 +1209,7 @@ const CMD_INJECTION_RE = [
 ];
 
 /** Rules whose regex-layer findings are dropped on files a data-flow engine analysed (see analyzeFile). */
-export const ENGINE_OWNED_RULES: ReadonlySet<string> = new Set(["ssrf", "command-injection"]);
+export const ENGINE_OWNED_RULES: ReadonlySet<string> = new Set(["ssrf"]);
 
 const SSRF_RE = [
   /(?:fetch|axios\.(?:get|post|put|delete|patch))\s*\(\s*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
@@ -2720,21 +2720,37 @@ function callHasOnlyConstantCommand(lines: string[], at: number): boolean {
   return any;
 }
 
-function isShellExecLine(line: string, importsChildProcess: boolean): boolean {
-  return SHELL_EXEC_RE.some(r => r.test(line)) || NODE_SHELL_SPAWN_RE.test(line) || (importsChildProcess && NODE_BARE_EXEC_RE.test(line));
+function isShellExecLine(line: string, importsChildProcess: boolean, cpAliasRE?: RegExp): boolean {
+  return SHELL_EXEC_RE.some(r => r.test(line)) || NODE_SHELL_SPAWN_RE.test(line)
+    || (importsChildProcess && NODE_BARE_EXEC_RE.test(line))
+    || (cpAliasRE != null && cpAliasRE.test(line));
 }
 
-function findEvalExec(lines: string[], importsChildProcess = lines.some(l => /\bchild_process\b/.test(l))): ScanIndicator[] {
+function findEvalExec(lines: string[], importsChildProcess = lines.some(l => /\bchild_process\b/.test(l)), rawLines?: string[]): ScanIndicator[] {
   // `os.system("clear")`, `execSync("npm run build")`, `eval("1 + 1")`: a command or code that is a constant is not an injection, whatever
   // the call is. (Found by DataFlowBench's negative cases: a sink fed only a literal was reported as critical remote code execution.)
   const code = runDetector(lines, EVAL_EXEC_RE.slice(0, 2), "eval-exec", "Arbitrary Code Execution", "critical",
     "eval/exec/Function constructor — severe RCE risk", { skipComments: true });
   // Running a shell command is command injection (CWE-78), found by RealVuln: 38 labelled command-injection cases were reported under the
   // code-injection weakness (CWE-95) and so not matched, and spawn(..., { shell: true }) / a bare exec() were not recognised at all.
+  // When child_process is imported as an alias (const cp = require("child_process")), build a regex
+  // that also catches aliased .exec() calls such as cp.exec(...).
+  // Use rawLines (original, pre-string-blanking) if supplied, since callOnlyLines blanks string literals.
+  let cpAliasRE: RegExp | undefined;
+  if (importsChildProcess) {
+    const aliasNames: string[] = [];
+    for (const l of (rawLines ?? lines)) {
+      const m = /\b(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*["']child_process["']\s*\)/.exec(l);
+      if (m) aliasNames.push(m[1]);
+    }
+    if (aliasNames.length > 0) {
+      cpAliasRE = new RegExp(`\\b(?:${aliasNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\.exec(?:Sync)?\\s*\\(`);
+    }
+  }
   const shell: ScanIndicator[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (isNonExecutableLine(lines[i]) || isCommentLine(lines[i])) continue;
-    if (!isShellExecLine(lines[i], importsChildProcess)) continue;
+    if (!isShellExecLine(lines[i], importsChildProcess, cpAliasRE)) continue;
     shell.push({ id: "command-injection", label: "Command Injection", severity: "critical", line: i + 1,
       detail: "A shell command is run from a value that is not a constant — a shell interprets metacharacters (; | && $( ) in it. Pass the program and its arguments separately (execFile / spawn without a shell, subprocess with a list)." });
   }
@@ -8907,7 +8923,7 @@ export function analyzeFile(
     ...(lang === "ruby" ? findRubyTaintFindings(codeLines) : []),
     // calls only: in JS/TS, "eval()" inside a string (a description, a title, a sample shown in the UI) is text
     // (the import is looked for in the real source: the lines passed on have their string literals blanked, `"child_process"` included)
-    ...findEvalExec(callOnlyLines(codeLines, tsSourceFile), /\bchild_process\b/.test(content)),
+    ...findEvalExec(callOnlyLines(codeLines, tsSourceFile), /\bchild_process\b/.test(content), codeLines),
     ...findJwtBypass(codeLines),
     ...(lang === "typescript" || lang === "javascript" || lang === "java" || lang === "kotlin" || lang === "golang" ? findJwtDecodeWithoutVerify(codeLines) : []),
     ...findTlsVerificationDisabled(codeLines),

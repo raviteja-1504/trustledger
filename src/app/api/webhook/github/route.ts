@@ -77,18 +77,6 @@ async function handle(req: NextRequest) {
 
   const payload = JSON.parse(rawBody) as Record<string, unknown>;
 
-  // ── 1b. Payload structure validation ──────────────────────────────────────
-  // Reject well-signed but structurally malformed payloads (GitHub app
-  // misconfigurations, test harnesses sending incomplete bodies) early so
-  // the rest of the handler can type-cast safely.
-  if (event === "pull_request") {
-    const pr   = payload.pull_request as Record<string, unknown> | null | undefined;
-    const repo = payload.repository   as Record<string, unknown> | null | undefined;
-    if (!pr || !repo || !(pr.head as Record<string, unknown>)?.sha || !repo.full_name) {
-      return NextResponse.json({ error: "malformed_payload" }, { status: 422 });
-    }
-  }
-
   // ── 2. Rate-limit by installation ID ──────────────────────────────────────
   const installationId = (payload.installation as Record<string, unknown>)?.id as number | undefined;
   const rl = await checkRateLimit(String(installationId ?? "unknown"), RATE_LIMITS.webhook);
@@ -98,6 +86,12 @@ async function handle(req: NextRequest) {
 
   // ── 3. Handle PR events ────────────────────────────────────────────────────
   if (event === "pull_request") {
+    // Reject well-signed but structurally malformed payloads early.
+    const _pr   = payload.pull_request as Record<string, unknown> | null | undefined;
+    const _repo = payload.repository   as Record<string, unknown> | null | undefined;
+    if (!_pr || !_repo || !(_pr.head as Record<string, unknown>)?.sha || !_repo.full_name) {
+      return NextResponse.json({ error: "malformed_payload" }, { status: 422 });
+    }
     const action = payload.action as string;
     if (!["opened", "synchronize", "reopened"].includes(action)) {
       return NextResponse.json({ ok: true, skipped: true });
