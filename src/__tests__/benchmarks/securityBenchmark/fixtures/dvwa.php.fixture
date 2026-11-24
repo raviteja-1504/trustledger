@@ -1,0 +1,152 @@
+<?php
+/**
+ * DVWA-pattern benchmark fixture (PHP)
+ * Cases 01-13: vulnerable patterns modelled on DVWA
+ * Cases 71-78: negative (safe) patterns — MUST NOT trigger a finding
+ * BENCHMARK ONLY — DO NOT DEPLOY.
+ */
+
+$db = new mysqli("localhost", "root", "", "dvwa");
+
+// -- Vulnerable patterns -------------------------------------------------------
+
+// 01
+// SQL injection — $_GET directly in query string (DVWA sqli low)
+$id = $_GET['id'];
+$query = "SELECT * FROM users WHERE user_id = '$id'";
+$result = $db->query($query);
+
+// 02
+// SQL injection — POST data in UNION-based injection (DVWA sqli medium)
+$firstname = $_POST['firstname'];
+$lastname  = $_POST['lastname'];
+$sql = "INSERT INTO guestbook (comment, name) VALUES ('$firstname', '$lastname')";
+$db->query($sql);
+
+// 03
+// SQL injection — blind: sleep/benchmark in numeric context (DVWA sqli_blind)
+$user_id = $_GET['id'];
+$query   = "SELECT first_name FROM users WHERE user_id = " . $user_id;
+$result  = $db->query($query);
+
+// 04
+// XSS reflected — raw echo of GET parameter (DVWA xss_r low)
+$name = $_GET['name'];
+echo "<pre>Hello " . $name . "</pre>";
+
+// 05
+// XSS stored — stored comment echoed without sanitisation (DVWA xss_s)
+$message = $_POST['message'];
+$sql = "INSERT INTO guestbook (comment) VALUES ('$message')";
+$db->query($sql);
+// later retrieval:
+$rows = $db->query("SELECT comment FROM guestbook");
+while ($row = $rows->fetch_assoc()) {
+    echo "<p>" . $row['comment'] . "</p>";
+}
+
+// 06
+// Command injection — shell_exec with unsanitised $_POST (DVWA exec low)
+$target = $_POST['ip'];
+$output = shell_exec("ping -c 4 " . $target);
+echo $output;
+
+// 07
+// Path traversal — include() with user-controlled file parameter (DVWA fi low)
+$file = $_GET['page'];
+include($file);
+
+// 08
+// Path traversal — file_get_contents with ../traversal (DVWA fi medium)
+$page = $_GET['page'];
+$content = file_get_contents("/var/www/html/" . $page);
+echo $content;
+
+// 09
+// Insecure deserialization — unserialize() on user data (DVWA insecure_deserial)
+$data   = $_COOKIE['user_data'];
+$object = unserialize($data);
+echo $object->name;
+
+// 10
+// Auth weakness — MD5 for password storage (DVWA auth)
+$password = $_POST['password'];
+$hash     = md5($password);
+$db->query("UPDATE users SET password='$hash' WHERE user_id=1");
+
+// 11
+// Auth weakness — timing-unsafe comparison (DVWA brute force)
+$stored_token = $db->query("SELECT token FROM sessions")->fetch_row()[0];
+$supplied     = $_GET['token'];
+if ($stored_token == $supplied) {
+    echo "Access granted";
+}
+
+// 12
+// Secrets exposure — hardcoded DB root password (DVWA setup)
+$GLOBALS['db_root_pass'] = "p@ssw0rd";
+$admin_db = new mysqli("localhost", "root", "p@ssw0rd", "dvwa");
+
+// 13
+// SSRF — curl fetch with user-supplied URL (DVWA ssrf)
+$url = $_GET['url'];
+$ch  = curl_init($url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+echo $response;
+
+// -- Negative (safe) patterns --------------------------------------------------
+
+// 71
+// SAFE SQL — prepared statement with bind_param
+$stmt = $db->prepare("SELECT * FROM users WHERE user_id = ?");
+$safe_id = $_GET['id'];
+$stmt->bind_param("s", $safe_id);
+$stmt->execute();
+
+// 72
+// SAFE XSS — htmlspecialchars before echo
+$safe_name = htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8');
+echo "<pre>Hello " . $safe_name . "</pre>";
+
+// 73
+// SAFE command — escapeshellarg before shell_exec
+$safe_target = escapeshellarg($_POST['ip']);
+$safe_output = shell_exec("ping -c 4 " . $safe_target);
+echo $safe_output;
+
+// 74
+// SAFE path — basename() to strip traversal
+$safe_page = basename($_GET['page']);
+include("/var/www/html/pages/" . $safe_page);
+
+// 75
+// SAFE deserialization — json_decode instead of unserialize
+$safe_data   = $_COOKIE['user_data'];
+$safe_object = json_decode($safe_data, true);
+echo htmlspecialchars($safe_object['name']);
+
+// 76
+// SAFE auth — password_hash with bcrypt
+$safe_pw   = $_POST['password'];
+$safe_hash = password_hash($safe_pw, PASSWORD_BCRYPT);
+$db->query("UPDATE users SET password=? WHERE user_id=1");
+
+// 77
+// SAFE secrets — password from environment variable
+$db_pass = getenv('DB_ROOT_PASSWORD');
+$safe_db = new mysqli("localhost", "root", $db_pass, "dvwa");
+
+// 78
+// SAFE SSRF — URL scheme and host validation before curl
+$raw_url   = $_GET['url'];
+$parsed    = parse_url($raw_url);
+$safe_host = $parsed['host'] ?? '';
+$allowed   = ['api.example.com'];
+if (!in_array($safe_host, $allowed, true)) {
+    http_response_code(403);
+    exit("Disallowed host");
+}
+$ch = curl_init($raw_url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+echo curl_exec($ch);

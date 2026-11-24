@@ -1,0 +1,19 @@
+// C# interprocedural case CS-02: Path traversal via helper chain
+// Source: req.Query["name"]  Sink: File.ReadAllText(filePath)
+// Steps: loader.Load(name), Path.Combine("/srv/files", name)
+using Microsoft.AspNetCore.Http;
+class FileLoader {
+    string _base;
+    public FileLoader(string b) { _base = b; }
+    public string Load(string name) {
+        var filePath = System.IO.Path.Combine(_base, name);
+        return System.IO.File.ReadAllText(filePath);
+    }
+}
+class FileController {
+    FileLoader loader = new FileLoader("/srv/files");
+    public string Get(HttpRequest req) {
+        var name = req.Query["name"];
+        return loader.Load(name);
+    }
+}

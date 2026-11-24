@@ -176,6 +176,9 @@ describe("cipher use", () => {
     expect(ids2(withComment)).not.toContain("weak-crypto");
     const noComment = `  cipher = OpenSSL::Cipher.new('AES-256-CBC')\n  cipher.encrypt\n  cipher.key = cipher.random_key\n  cipher.iv = cipher.random_iv\n`;
     expect(ids2(noComment)).toContain("weak-crypto");
+    // TLS cipher-suite mandate: also suppressed
+    const tlsComment = `  # TLS cipher suite requires CBC for PCI compliance\n  cipher = OpenSSL::Cipher.new('AES-256-CBC')\n  cipher.encrypt\n  cipher.key = cipher.random_key\n  cipher.iv = cipher.random_iv\n`;
+    expect(ids2(tlsComment)).not.toContain("weak-crypto");
   });
 });
 

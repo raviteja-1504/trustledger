@@ -18,10 +18,88 @@
  */
 import { APPSEC_CWE } from "./appsecRules";
 
+/** OWASP Top 10 (2021) category tag, e.g. "A03:2021 – Injection". */
+export type OwaspCategory =
+  | "A01:2021 – Broken Access Control"
+  | "A02:2021 – Cryptographic Failures"
+  | "A03:2021 – Injection"
+  | "A04:2021 – Insecure Design"
+  | "A05:2021 – Security Misconfiguration"
+  | "A07:2021 – Identification and Authentication Failures"
+  | "A08:2021 – Software and Data Integrity Failures"
+  | "A09:2021 – Security Logging and Monitoring Failures"
+  | "A10:2021 – Server-Side Request Forgery";
+
 export interface CweEntry {
-  id:    string; // e.g. "CWE-89"
-  title: string; // official MITRE CWE title
+  id:     string;        // e.g. "CWE-89"
+  title:  string;        // official MITRE CWE title
+  owasp?: OwaspCategory; // OWASP Top 10 (2021) category, where applicable
 }
+
+/** Map from CWE id string (e.g. "CWE-89") to its OWASP Top 10 (2021) category. */
+export const CWE_OWASP_MAP: Partial<Record<string, OwaspCategory>> = {
+  // A01 – Broken Access Control
+  "CWE-22":   "A01:2021 – Broken Access Control",
+  "CWE-284":  "A01:2021 – Broken Access Control",
+  "CWE-285":  "A01:2021 – Broken Access Control",
+  "CWE-269":  "A01:2021 – Broken Access Control",
+  "CWE-639":  "A01:2021 – Broken Access Control",
+  "CWE-862":  "A01:2021 – Broken Access Control",
+  "CWE-732":  "A01:2021 – Broken Access Control",
+  "CWE-601":  "A01:2021 – Broken Access Control",
+  "CWE-352":  "A01:2021 – Broken Access Control",
+  // A02 – Cryptographic Failures
+  "CWE-311":  "A02:2021 – Cryptographic Failures",
+  "CWE-312":  "A02:2021 – Cryptographic Failures",
+  "CWE-319":  "A02:2021 – Cryptographic Failures",
+  "CWE-321":  "A02:2021 – Cryptographic Failures",
+  "CWE-326":  "A02:2021 – Cryptographic Failures",
+  "CWE-327":  "A02:2021 – Cryptographic Failures",
+  "CWE-330":  "A02:2021 – Cryptographic Failures",
+  "CWE-256":  "A02:2021 – Cryptographic Failures",
+  // A03 – Injection
+  "CWE-78":   "A03:2021 – Injection",
+  "CWE-79":   "A03:2021 – Injection",
+  "CWE-88":   "A03:2021 – Injection",
+  "CWE-89":   "A03:2021 – Injection",
+  "CWE-90":   "A03:2021 – Injection",
+  "CWE-95":   "A03:2021 – Injection",
+  "CWE-113":  "A03:2021 – Injection",
+  "CWE-117":  "A03:2021 – Injection",
+  "CWE-134":  "A03:2021 – Injection",
+  "CWE-643":  "A03:2021 – Injection",
+  "CWE-917":  "A03:2021 – Injection",
+  "CWE-943":  "A03:2021 – Injection",
+  "CWE-1321": "A03:2021 – Injection",
+  "CWE-1336": "A03:2021 – Injection",
+  // A04 – Insecure Design
+  "CWE-915":  "A04:2021 – Insecure Design",
+  // A05 – Security Misconfiguration
+  "CWE-16":   "A05:2021 – Security Misconfiguration",
+  "CWE-200":  "A05:2021 – Security Misconfiguration",
+  "CWE-209":  "A05:2021 – Security Misconfiguration",
+  "CWE-489":  "A05:2021 – Security Misconfiguration",
+  "CWE-611":  "A05:2021 – Security Misconfiguration",
+  "CWE-693":  "A05:2021 – Security Misconfiguration",
+  "CWE-942":  "A05:2021 – Security Misconfiguration",
+  // A07 – Identification and Authentication Failures
+  "CWE-287":  "A07:2021 – Identification and Authentication Failures",
+  "CWE-295":  "A07:2021 – Identification and Authentication Failures",
+  "CWE-306":  "A07:2021 – Identification and Authentication Failures",
+  "CWE-347":  "A07:2021 – Identification and Authentication Failures",
+  "CWE-384":  "A07:2021 – Identification and Authentication Failures",
+  "CWE-522":  "A07:2021 – Identification and Authentication Failures",
+  "CWE-798":  "A07:2021 – Identification and Authentication Failures",
+  // A08 – Software and Data Integrity Failures
+  "CWE-345":  "A08:2021 – Software and Data Integrity Failures",
+  "CWE-502":  "A08:2021 – Software and Data Integrity Failures",
+  "CWE-506":  "A08:2021 – Software and Data Integrity Failures",
+  // A09 – Security Logging and Monitoring Failures
+  "CWE-532":  "A09:2021 – Security Logging and Monitoring Failures",
+  "CWE-778":  "A09:2021 – Security Logging and Monitoring Failures",
+  // A10 – Server-Side Request Forgery
+  "CWE-918":  "A10:2021 – Server-Side Request Forgery",
+};
 
 export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   // Expanded AppSec rules (appsecRules.ts, itself dependency-free).
@@ -123,5 +201,8 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
 };
 
 export function cweFor(indicatorId: string): CweEntry | undefined {
-  return INDICATOR_CWE_MAP[indicatorId];
+  const entry = INDICATOR_CWE_MAP[indicatorId];
+  if (!entry) return undefined;
+  const owasp = CWE_OWASP_MAP[entry.id];
+  return owasp ? { ...entry, owasp } : entry;
 }

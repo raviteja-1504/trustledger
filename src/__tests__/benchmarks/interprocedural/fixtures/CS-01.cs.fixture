@@ -1,0 +1,24 @@
+// C# interprocedural case CS-01: SQL injection via service layer (session → DB)
+// Source: req.Query["id"]  Sink: cmd.ExecuteReader()
+// Steps: service.GetUser(userId), "SELECT * FROM Users WHERE Id = " + userId
+using Microsoft.AspNetCore.Http;
+using System.Data.SqlClient;
+class UserService {
+    string _conn;
+    public UserService(string conn) { _conn = conn; }
+    public object GetUser(string userId) {
+        using var conn = new SqlConnection(_conn);
+        conn.Open();
+        var cmd = new SqlCommand("SELECT * FROM Users WHERE Id = " + userId, conn);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? reader["Name"] : null;
+    }
+}
+class UserController {
+    UserService service = new UserService("Server=.;Database=app;");
+    public string Get(HttpRequest req) {
+        var id = req.Query["id"];
+        var result = service.GetUser(id);
+        return result?.ToString() ?? "";
+    }
+}

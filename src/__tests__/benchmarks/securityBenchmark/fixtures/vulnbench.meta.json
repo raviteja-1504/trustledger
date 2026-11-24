@@ -1,0 +1,25 @@
+{
+  "app":  "vulnbench",
+  "path": "vulnbench.py",
+  "cases": {
+    "01": { "category": "sqli",           "cwe": 89,  "negative": false, "label": "SQL injection via % formatting" },
+    "02": { "category": "sqli",           "cwe": 89,  "negative": false, "label": "SQL injection via f-string in ORDER BY" },
+    "03": { "category": "ssrf",           "cwe": 918, "negative": false, "label": "SSRF via requests.get with user URL" },
+    "04": { "category": "ssrf",           "cwe": 918, "negative": false, "label": "SSRF via proxy to internal service" },
+    "05": { "category": "template-injection","cwe": 94,"negative": false, "label": "SSTI via Jinja2.from_string" },
+    "06": { "category": "cmdi",           "cwe": 78,  "negative": false, "label": "Command injection via shell=True" },
+    "07": { "category": "path-traversal", "cwe": 22,  "negative": false, "label": "Path traversal via open()" },
+    "08": { "category": "auth-weakness",  "cwe": 916, "negative": false, "label": "Weak password hashing (MD5)" },
+    "09": { "category": "auth-weakness",  "cwe": 347, "negative": false, "label": "JWT signature not verified" },
+    "10": { "category": "secrets-exposure","cwe": 798,"negative": false, "label": "Hardcoded AWS access key" },
+    "11": { "category": "xss",            "cwe": 79,  "negative": false, "label": "XSS via autoescape=False Jinja2" },
+    "12": { "category": "cmdi",           "cwe": 94,  "negative": false, "label": "eval() with user-supplied expression" },
+    "71": { "category": "sqli",           "cwe": 89,  "negative": true,  "label": "SAFE: parameterised placeholder" },
+    "72": { "category": "ssrf",           "cwe": 918, "negative": true,  "label": "SAFE: URL hostname allowlist" },
+    "73": { "category": "template-injection","cwe": 94,"negative": true, "label": "SAFE: autoescape=True Jinja2" },
+    "74": { "category": "cmdi",           "cwe": 78,  "negative": true,  "label": "SAFE: subprocess list, no shell" },
+    "75": { "category": "path-traversal", "cwe": 22,  "negative": true,  "label": "SAFE: os.path.basename" },
+    "76": { "category": "auth-weakness",  "cwe": 916, "negative": true,  "label": "SAFE: bcrypt password hashing" },
+    "77": { "category": "secrets-exposure","cwe": 798,"negative": true,  "label": "SAFE: key from environment" }
+  }
+}

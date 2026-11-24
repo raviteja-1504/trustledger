@@ -1,4 +1,4 @@
-import { warmGoTaintEngine, scanAstTaintGo } from "@/lib/astTaintGo";
+import { warmGoTaintEngine, scanAstTaintGo, computeGoPassThroughFunctions, parseGoSourceSync } from "@/lib/astTaintGo";
 import { analyzeFile } from "@/lib/scanner";
 
 beforeAll(async () => { await warmGoTaintEngine(); }, 120000);
@@ -527,5 +527,89 @@ func handler(w http.ResponseWriter, r *http.Request) {
       const findings = scanAstTaintGo(content, "x.go");
       expect(findings.some(f => f.id === "idor")).toBe(true);
     });
+  });
+});
+
+// ── spec G: cross-file return-value propagation (imported helper shapes) ──────
+
+describe("astTaintGo cross-file return shapes (spec G)", () => {
+  const helperContent = `
+package store
+
+import "database/sql"
+
+// BuildQuery wraps the user id into a SQL fragment — its param propagates to the return value.
+func BuildQuery(id string) string {
+	return "SELECT * FROM users WHERE id=" + id
+}
+
+// ExecQuery runs a query string against the db — its param reaches a SQL sink.
+func ExecQuery(db *sql.DB, query string) {
+	db.Exec(query)
+}
+`;
+
+  it("G1: computeGoPassThroughFunctions extracts BuildQuery's param->return shape", () => {
+    const root = parseGoSourceSync(helperContent, "store/query.go");
+    expect(root).toBeTruthy();
+    const shapes = computeGoPassThroughFunctions(helperContent, "store/query.go", root!);
+    // store.BuildQuery param 0 should propagate to return
+    const entry = shapes.get("store.BuildQuery");
+    expect(entry).toBeTruthy();
+    expect(entry!.some(([idx]) => idx === 0)).toBe(true);
+  });
+
+  it("G2: computeGoPassThroughFunctions does not emit shapes for ExecQuery (sink, not passthrough)", () => {
+    const root = parseGoSourceSync(helperContent, "store/query.go");
+    const shapes = computeGoPassThroughFunctions(helperContent, "store/query.go", root!);
+    // ExecQuery calls a sink internally but doesn't return the tainted value
+    const entry = shapes.get("store.ExecQuery");
+    // Either absent or empty — the taint doesn't reach the return value
+    expect(!entry || entry.length === 0).toBe(true);
+  });
+
+  it("G3: scanAstTaintGo flags sql-injection through cross-file helper via crossFileShapes", () => {
+    const callerContent = `
+package main
+
+import (
+	"database/sql"
+	"net/http"
+	"store"
+)
+
+func handler(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	id := r.URL.Query().Get("id")
+	q := store.BuildQuery(id)
+	db.Exec(q)
+}
+`;
+    // Provide BuildQuery's shape: param 0 propagates to return (ALL classes preserved)
+    const ALL = (1 << 15) - 1;
+    const crossFileShapes = new Map([["store.BuildQuery", [[0, ALL]] as [number, number][]]]);
+    const findings = scanAstTaintGo(callerContent, "main/handler.go", undefined, undefined, undefined, { crossFileShapes });
+    expect(findings.some(f => f.id === "sql-injection")).toBe(true);
+  });
+
+  it("G4: scanAstTaintGo does NOT flag when crossFileShapes is absent (confirms the gap)", () => {
+    const callerContent = `
+package main
+
+import (
+	"database/sql"
+	"net/http"
+	"store"
+)
+
+func handler(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	id := r.URL.Query().Get("id")
+	q := store.BuildQuery(id)
+	db.Exec(q)
+}
+`;
+    // No cross-file shapes: the gap should be present without them
+    const findings = scanAstTaintGo(callerContent, "main/handler.go");
+    // This confirms the gap — without shapes the taint through BuildQuery is lost
+    expect(findings.some(f => f.id === "sql-injection")).toBe(false);
   });
 });

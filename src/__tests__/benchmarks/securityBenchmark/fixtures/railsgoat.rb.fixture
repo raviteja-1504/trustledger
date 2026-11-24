@@ -1,0 +1,179 @@
+# RailsGoat-pattern benchmark fixture (Ruby on Rails)
+# Cases 01-11: vulnerable patterns modelled on RailsGoat
+# Cases 71-77: negative (safe) patterns — MUST NOT trigger a finding
+# BENCHMARK ONLY — DO NOT DEPLOY.
+
+# 01
+# SQL injection — string interpolation in where() (RailsGoat analytics)
+class AnalyticsController
+  def show
+    user_id = params[:user_id]
+    @data   = User.where("user_id = '#{user_id}'")
+    render json: @data
+  end
+end
+
+# 02
+# SQL injection — find_by_sql with string concatenation (RailsGoat reports)
+class ReportsController
+  def search
+    term  = params[:term]
+    @rows = User.find_by_sql("SELECT * FROM users WHERE email LIKE '%" + term + "%'")
+    render json: @rows
+  end
+end
+
+# 03
+# Mass assignment — permit(:admin) allows privilege escalation (RailsGoat users)
+class UsersController
+  def update
+    @user = User.find(params[:id])
+    @user.update!(params[:user].permit(:name, :email, :admin))
+    render json: @user
+  end
+end
+
+# 04
+# Insecure deserialization — Marshal.load on user-supplied cookie (RailsGoat session)
+class SessionsController
+  def restore
+    encoded = cookies[:session_data]
+    obj     = Marshal.load(Base64.decode64(encoded))
+    render json: { user: obj[:user] }
+  end
+end
+
+# 05
+# Auth weakness — hardcoded admin password in seed (RailsGoat db/seeds.rb)
+User.create!(
+  email:    "admin@railsgoat.com",
+  password: "admin1234",
+  admin:    true
+)
+
+# 06
+# Template injection — render inline with user input (RailsGoat messages)
+class MessagesController
+  def preview
+    template = params[:template]
+    output   = ERB.new(template).result
+    render html: output.html_safe
+  end
+end
+
+# 07
+# Path traversal — open() with user path (RailsGoat attachments)
+class AttachmentsController
+  def download
+    path    = params[:path]
+    content = File.read(Rails.root.join("uploads", path))
+    send_data content
+  end
+end
+
+# 08
+# Auth weakness — timing-unsafe token comparison (RailsGoat API tokens)
+class ApiController
+  MASTER_TOKEN = "railsgoat_secret_token"
+  def verify
+    supplied = request.headers["X-API-Token"]
+    if supplied == MASTER_TOKEN
+      render json: { ok: true }
+    else
+      head :unauthorized
+    end
+  end
+end
+
+# 09
+# Secrets exposure — hardcoded S3 key in config (RailsGoat config/initializers)
+S3_ACCESS_KEY = "AKIARAILSGOAT12345"
+S3_SECRET     = "railsgoat_s3_secret_key_abcdef"
+
+# 10
+# XSS — raw/html_safe on user data without sanitisation (RailsGoat view)
+class CommentsController
+  def show
+    text = params[:text]
+    render html: text.html_safe
+  end
+end
+
+# 11
+# Authorization weakness — no ownership check (RailsGoat benefits)
+class BenefitsController
+  def update
+    @benefit = Benefit.find(params[:id])
+    @benefit.update!(benefit_params)
+    render json: @benefit
+  end
+  private
+  def benefit_params
+    params.require(:benefit).permit(:name, :value)
+  end
+end
+
+# -- Negative (safe) patterns --------------------------------------------------
+
+# 71
+# SAFE SQL — parameterised placeholder
+class SafeAnalyticsController
+  def show
+    user_id = params[:user_id]
+    @data   = User.where("user_id = ?", user_id)
+    render json: @data
+  end
+end
+
+# 72
+# SAFE mass assignment — explicit permit without :admin
+class SafeUsersController
+  def update
+    @user = User.find(params[:id])
+    @user.update!(params[:user].permit(:name, :email))
+    render json: @user
+  end
+end
+
+# 73
+# SAFE deserialization — JSON.parse instead of Marshal.load
+class SafeSessionsController
+  def restore
+    encoded = cookies[:session_data]
+    obj     = JSON.parse(Base64.decode64(encoded))
+    render json: { user: obj["user"] }
+  end
+end
+
+# 74
+# SAFE template — ERB with auto-escape via sanitize()
+class SafeMessagesController
+  def preview
+    template = ActionController::Base.helpers.sanitize(params[:template])
+    render html: ERB.new(template).result.html_safe
+  end
+end
+
+# 75
+# SAFE path — File.basename to strip directory components
+class SafeAttachmentsController
+  def download
+    name    = File.basename(params[:path])
+    content = File.read(Rails.root.join("uploads", name))
+    send_data content
+  end
+end
+
+# 76
+# SAFE secrets — S3 credentials from environment
+S3_KEY_SAFE    = ENV["AWS_ACCESS_KEY_ID"]
+S3_SECRET_SAFE = ENV["AWS_SECRET_ACCESS_KEY"]
+
+# 77
+# SAFE XSS — html_escape before rendering
+class SafeCommentsController
+  def show
+    text = CGI.escapeHTML(params[:text])
+    render html: text.html_safe
+  end
+end

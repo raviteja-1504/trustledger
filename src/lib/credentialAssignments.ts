@@ -80,7 +80,8 @@ export function plausibleCredentialValue(value: string, keyName: string, o: Cred
 }
 
 // Bounded runs (`{0,60}`): a long minified line cannot make the key search backtrack badly.
-const QUOTED_ASSIGNMENT_RE = new RegExp(`([A-Za-z0-9_.-]{0,60}(?:${CREDENTIAL_NAMES})[A-Za-z0-9_.-]{0,60})["']?\\s*(?::=|=>|=|:)\\s*[bru]?(["'])([^"'\\s]{4,300})\\2`, "i");
+// `=(?!=)` avoids matching `==`/`===` comparisons (e.g. `config.secret === "unconfigured"` is not an assignment)
+const QUOTED_ASSIGNMENT_RE = new RegExp(`([A-Za-z0-9_.-]{0,60}(?:${CREDENTIAL_NAMES})[A-Za-z0-9_.-]{0,60})["']?\\s*(?::=|=>|=(?!=)|:)\\s*[bru]?(["'])([^"'\\s]{4,300})\\2`, "i");
 const UNQUOTED_ASSIGNMENT_RE = new RegExp(`^\\s*(?:export\\s+|ENV\\s+|-\\s+|set\\s+|setenv\\s+)?([A-Za-z0-9_.-]{0,60}(?:${CREDENTIAL_NAMES})[A-Za-z0-9_.-]{0,60})\\s*[:=]\\s*([^\\s"'#,;{}\\\\]{4,300})(?:\\s+(?:#|;|//).*)?\\s*\\\\?\\s*$`, "i");
 // A command line: `mysql --user=root --password=2mPnZ9z5rx`, `--token abc123...`, `--api-key=...`
 const CLI_FLAG_RE = /(?:^|\s)--?(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token|requirepass|masterauth)(?:=|\s+)([^\s"'$<>|;&]{6,200})/i;

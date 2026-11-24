@@ -1,5 +1,5 @@
 /**
- * AI Model Attribution Engine v2
+ * AI Model Attribution Engine v3
  *
  * Architecture: evidence-weighted Bayesian scoring
  *
@@ -12,6 +12,20 @@
  *
  * Final confidence is normalized against the full posterior distribution,
  * not a simple softmax — models compete for the same evidence pool.
+ *
+ * Evidence is classified into three tiers (task spec §A):
+ *   1. direct_provenance  — authenticated generation records, watermarks (not used here)
+ *   2. tool_workflow      — commit messages, CI metadata, .cursor/.copilot config files
+ *   3. statistical_stylistic — regex pattern similarity to known AI output styles
+ *
+ * This engine operates on file content only and therefore only produces
+ * statistical_stylistic evidence. Callers that have git/CI context should
+ * promote the evidence category before surfacing the result to users.
+ *
+ * IMPORTANT: Specific model identification (github-copilot, claude, etc.) is a
+ * probabilistic estimate based on stylistic patterns. It has NOT been validated
+ * against a labeled corpus. It is an indicator of WHICH tool's style the code
+ * resembles, not proof of which tool generated it.
  */
 
 export type AIModel =
@@ -25,12 +39,27 @@ export type AIModel =
   | "human"
   | "unknown";
 
+/** Which class of evidence drove the result (task spec §A). */
+export type EvidenceCategory = "direct_provenance" | "tool_workflow" | "statistical_stylistic";
+
+/** Current engine version — increment when scoring logic or patterns change. */
+export const AI_ATTRIBUTION_ENGINE_VERSION = "3.1";
+
 export interface AttributionResult {
   model:      AIModel;
   confidence: number;               // 0–1, normalized posterior
-  signals:    string[];             // human-readable evidence list
+  signals:    string[];             // supporting evidence (human-readable)
+  contradictingSignals: string[];   // evidence that argues AGAINST the top prediction
   breakdown:  Record<AIModel, number>;
   humanEvidence: number;            // 0–1.5, raw (un-normalized) human-signal strength
+  /** Whether there is insufficient evidence to make a reliable attribution. */
+  insufficientEvidence: boolean;
+  /** Which evidence class drove this result (always "statistical_stylistic" from attributeCode). */
+  evidenceCategory: EvidenceCategory;
+  /** Why to treat this result with caution. Always populated; not an error condition. */
+  confidenceLimitations: string[];
+  /** Identifies the scoring logic used to produce this result. */
+  engineVersion: string;
 }
 
 // ── Pattern definitions ────────────────────────────────────────────────────────
@@ -279,7 +308,17 @@ const HUMAN_SIGNALS: HumanSignal[] = [
 
 export function attributeCode(content: string, language: string): AttributionResult {
   if (!content || content.trim().length < 50) {
-    return { model:"unknown", confidence:0, signals:[], breakdown: emptyBreakdown(), humanEvidence: 0 };
+    return {
+      model: "unknown", confidence: 0, signals: [], contradictingSignals: [],
+      breakdown: emptyBreakdown(), humanEvidence: 0,
+      insufficientEvidence: true,
+      evidenceCategory: "statistical_stylistic",
+      confidenceLimitations: [
+        "Content too short for reliable attribution — insufficient signal surface.",
+        "Stylistic signals cannot independently establish AI authorship — corroborating evidence is required.",
+      ],
+      engineVersion: AI_ATTRIBUTION_ENGINE_VERSION,
+    };
   }
 
   const scores: Record<AIModel, number> = emptyBreakdown();
@@ -377,7 +416,32 @@ export function attributeCode(content: string, language: string): AttributionRes
   // Add top evidence from evidence log
   for (const e of evidenceLog.slice(0, 2)) signals.push(e);
 
-  return { model, confidence, signals, breakdown: posterior, humanEvidence };
+  // Collect contradicting signals: negative patterns from the winning model that fired
+  const contradictingSignals: string[] = [];
+  if (model !== "unknown" && model !== "human") {
+    const winnerDef = MODELS.find(d => d.model === model);
+    if (winnerDef) {
+      for (const n of winnerDef.negative) {
+        if (n.re.test(content)) contradictingSignals.push(n.note);
+      }
+    }
+  }
+
+  const confidenceLimitations: string[] = [
+    "These signals are stylistic pattern matches, not independently validated against a labeled corpus.",
+    "Stylistic signals cannot independently establish AI authorship — corroborating evidence is required.",
+  ];
+  if (model !== "unknown" && model !== "human") {
+    confidenceLimitations.push("Specific model identification is a probabilistic estimate, not confirmed identity.");
+  }
+
+  return {
+    model, confidence, signals, contradictingSignals, breakdown: posterior, humanEvidence,
+    insufficientEvidence: model === "unknown",
+    evidenceCategory: "statistical_stylistic",
+    confidenceLimitations,
+    engineVersion: AI_ATTRIBUTION_ENGINE_VERSION,
+  };
 }
 
 function emptyBreakdown(): Record<AIModel, number> {

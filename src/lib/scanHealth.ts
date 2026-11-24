@@ -14,6 +14,53 @@
  * Client-safe: no imports.
  */
 
+// ── Task 9: engine-stage types ────────────────────────────────────────────────
+
+/**
+ * The nine independently-measured analysis stages of a single-file scan.
+ * Recorded by engineMetrics.ts via recordStageTime(); consumed by runScan()
+ * to populate ScanTelemetry.engine_stages.
+ */
+export type EngineStage =
+  | "ast-parse"
+  | "ssa"
+  | "call-graph"
+  | "taint-propagation"
+  | "cross-file"
+  | "reachability"
+  | "vuln-detection"
+  | "ai-attribution"
+  | "compliance";
+
+/** Per-stage metrics collected over all files in a single scan. */
+export interface EngineStageMetrics {
+  /** Total milliseconds spent in this stage across all files. */
+  total_ms: number;
+  /** Number of times this stage was invoked (one per eligible file). */
+  invocations: number;
+  /** Number of invocations that raised a parse/analysis error. */
+  failures: number;
+  /** Number of invocations that were cut short by the time budget. */
+  timeouts: number;
+  /** Median latency per invocation (ms). */
+  p50_ms?: number;
+  /** 95th-percentile latency per invocation (ms). */
+  p95_ms?: number;
+  /** 99th-percentile latency per invocation (ms). */
+  p99_ms?: number;
+}
+
+/** CPU and memory snapshot taken at scan completion. */
+export interface ResourceSnapshot {
+  heap_used_bytes:  number;
+  heap_total_bytes: number;
+  rss_bytes:        number;
+  /** Microseconds of user-mode CPU used by this process since it started. */
+  cpu_user_us:      number;
+  /** Microseconds of kernel-mode CPU used by this process since it started. */
+  cpu_system_us:    number;
+}
+
 export type CoverageGapReason = "engine-unavailable" | "content-unavailable" | "parse-failed" | "analysis-failed" | "too-large" | "minified-or-generated" | "time-budget";
 
 export interface CoverageGap { file: string; language: string; reason: CoverageGapReason }
@@ -43,6 +90,44 @@ export interface ScanTelemetry {
   files_analyzed: number;
   files_reused: number;
   slowest: Array<{ file: string; ms: number }>;
+
+  // ── Scan reproducibility (task 5 §C) ──────────────────────────────────────
+  /** The PR base commit SHA at the time of scan (before_sha from the webhook event). */
+  base_commit_sha?: string | null;
+  /** Number of files in this PR that existed but were not scanned (removed, binary, over-size, etc.). */
+  files_skipped?: number;
+  /** Explicit completion status of this scan invocation. */
+  completion_status?: "complete" | "partial" | "timeout" | "error";
+  /** Number of files that were added to the scan by dependency-aware delta invalidation. */
+  dep_expanded_files?: number;
+
+  // ── Task 9: engine observability ──────────────────────────────────────────
+  /**
+   * Per-stage breakdown: latency (P50/P95/P99), invocation count, failures,
+   * and timeouts for each of the nine independently-measured analysis stages.
+   */
+  engine_stages?: Partial<Record<EngineStage, EngineStageMetrics>>;
+  /** CPU and memory snapshot captured at scan completion. */
+  resource_snapshot?: ResourceSnapshot;
+  /** Wall-clock milliseconds from job enqueue to scan worker start (queue depth signal). */
+  queue_latency_ms?: number;
+  /** Total milliseconds spent in DB round-trips during this scan. */
+  db_latency_ms?: number;
+  /**
+   * Fraction of files served from cache: files_reused / (files_analyzed + files_reused).
+   * 0 on a cold cache; 1 when all files were unchanged and reused.
+   */
+  cache_hit_rate?: number;
+  /** Files whose AST parse failed outright (gap reason "parse-failed"). */
+  parser_failures?: number;
+  /** Files dropped to the pattern layer by the time budget (gap reason "time-budget"). */
+  timeout_counts?: number;
+  /**
+   * false only when every scanned file received the full analysis its language supports.
+   * true whenever health.status is "partial" or "degraded" — an explicit assertion that
+   * performance optimizations never cause silent analysis skipping.
+   */
+  coverage_incomplete?: boolean;
 }
 
 export const MAX_GAPS = 50;

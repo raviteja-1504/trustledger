@@ -27,10 +27,37 @@ export async function POST(req: NextRequest) {
   return runWithTrace({ trace_id: traceIdFrom(req.headers.get("x-github-delivery") ?? req.headers.get("x-request-id")) }, () => handle(req));
 }
 
+// Maximum webhook body size: 10 MB. GitHub's documented max payload is ~25 MB for
+// push events, but TrustLedger only acts on pull_request and check_run events whose
+// real-world payloads are well under 1 MB. Reject anything larger before HMAC
+// computation so a malformed or malicious large body can't exhaust CPU.
+const MAX_WEBHOOK_BODY_BYTES = 10 * 1024 * 1024;
+
+// In-process delivery GUID cache: evict entries after 10 minutes. Provides fast
+// same-process dedup for rapid retries. Cross-instance dedup is handled by the
+// webhook_deliveries table lookup below.
+const recentGuids = new Map<string, number>();
+const GUID_TTL_MS = 10 * 60 * 1000;
+function seenGuid(guid: string): boolean {
+  const now = Date.now();
+  // Evict stale entries while we're here (amortised; runs at most once per request)
+  for (const [k, ts] of recentGuids) if (now - ts > GUID_TTL_MS) recentGuids.delete(k);
+  if (recentGuids.has(guid)) return true;
+  recentGuids.set(guid, now);
+  return false;
+}
+
 async function handle(req: NextRequest) {
   const rawBody = await req.text();
-  const sig     = req.headers.get("x-hub-signature-256");
-  const event   = req.headers.get("x-github-event");
+
+  // ── 0a. Request size limit ─────────────────────────────────────────────────
+  if (rawBody.length > MAX_WEBHOOK_BODY_BYTES) {
+    return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
+  }
+
+  const sig          = req.headers.get("x-hub-signature-256");
+  const event        = req.headers.get("x-github-event");
+  const deliveryGuid = req.headers.get("x-github-delivery") ?? "";
   // Trim any stray \r characters added by Windows CLI piping into Vercel env vars
   const secret  = (process.env.GITHUB_WEBHOOK_SECRET ?? "").trim();
 
@@ -39,7 +66,28 @@ async function handle(req: NextRequest) {
     return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
   }
 
+  // ── 1a. Event deduplication ────────────────────────────────────────────────
+  // Reject duplicate delivery GUIDs within the same process (rapid GitHub
+  // retries / misconfigured mirrors). The scan-worker's idempotency check on
+  // (org_id, repo, commit_sha, pr_number) handles cross-process / cross-instance
+  // duplicates; both guards together prevent double-scanning under all conditions.
+  if (deliveryGuid && seenGuid(deliveryGuid)) {
+    return NextResponse.json({ ok: true, skipped: true, reason: "duplicate_delivery" });
+  }
+
   const payload = JSON.parse(rawBody) as Record<string, unknown>;
+
+  // ── 1b. Payload structure validation ──────────────────────────────────────
+  // Reject well-signed but structurally malformed payloads (GitHub app
+  // misconfigurations, test harnesses sending incomplete bodies) early so
+  // the rest of the handler can type-cast safely.
+  if (event === "pull_request") {
+    const pr   = payload.pull_request as Record<string, unknown> | null | undefined;
+    const repo = payload.repository   as Record<string, unknown> | null | undefined;
+    if (!pr || !repo || !(pr.head as Record<string, unknown>)?.sha || !repo.full_name) {
+      return NextResponse.json({ error: "malformed_payload" }, { status: 422 });
+    }
+  }
 
   // ── 2. Rate-limit by installation ID ──────────────────────────────────────
   const installationId = (payload.installation as Record<string, unknown>)?.id as number | undefined;
@@ -142,7 +190,7 @@ async function handle(req: NextRequest) {
       source:          "github",
       event_type:      `pull_request.${action}`,
       repo_full_name:  repoFullName,
-      payload:         { ...payload, tl_check_run_id: checkRunId },
+      payload:         { ...payload, tl_check_run_id: checkRunId, tl_github_delivery_id: deliveryGuid || null },
       signature_ok:    true,
       processed:       false,
     }).select("id").single();

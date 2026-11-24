@@ -47,4 +47,41 @@ module.exports = renderTemplate;
     expect(finding?.codeCategory).toBe("application");
     expect(result.risk_score).toBe("CRITICAL");
   });
+
+  it("tags a finding inside an e2e/ directory as test_code", () => {
+    const content = `
+function runStep(userInput) {
+  eval(userInput);
+}
+`;
+    const result = analyzeFile("e2e/helpers/runStep.ts", content);
+    const finding = result.indicators.find(i => i.id === "eval-exec");
+    expect(finding).toBeDefined();
+    expect(finding?.codeCategory).toBe("test_code");
+    expect(result.risk_score).not.toBe("CRITICAL");
+  });
+
+  it("tags a finding inside a demo/ directory as test_code", () => {
+    const content = `
+function runDemo(userInput) {
+  eval(userInput);
+}
+`;
+    const result = analyzeFile("src/demo/demoRunner.ts", content);
+    const finding = result.indicators.find(i => i.id === "eval-exec");
+    expect(finding).toBeDefined();
+    expect(finding?.codeCategory).toBe("test_code");
+  });
+
+  it("tags a finding inside an examples/ directory as test_code", () => {
+    const content = `
+function showExample(userInput) {
+  eval(userInput);
+}
+`;
+    const result = analyzeFile("examples/advanced/index.ts", content);
+    const finding = result.indicators.find(i => i.id === "eval-exec");
+    expect(finding).toBeDefined();
+    expect(finding?.codeCategory).toBe("test_code");
+  });
 });

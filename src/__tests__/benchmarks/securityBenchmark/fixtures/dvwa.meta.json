@@ -1,0 +1,27 @@
+{
+  "app":  "dvwa",
+  "path": "dvwa.php",
+  "cases": {
+    "01": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via GET in WHERE (low)" },
+    "02": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via POST in INSERT (medium)" },
+    "03": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection — blind, numeric concat" },
+    "04": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "XSS reflected via raw echo (low)" },
+    "05": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "XSS stored — stored comment, no sanitisation" },
+    "06": { "category": "cmdi",                    "cwe": 78,  "negative": false, "label": "Command injection via shell_exec (low)" },
+    "07": { "category": "path-traversal",          "cwe": 22,  "negative": false, "label": "File inclusion via include() (low)" },
+    "08": { "category": "path-traversal",          "cwe": 22,  "negative": false, "label": "Path traversal via file_get_contents (medium)" },
+    "09": { "category": "insecure-deserialization","cwe": 502, "negative": false, "label": "Insecure deserialization via unserialize()" },
+    "10": { "category": "auth-weakness",           "cwe": 916, "negative": false, "label": "Weak password hashing (MD5)" },
+    "11": { "category": "auth-weakness",           "cwe": 208, "negative": false, "label": "Timing-unsafe token comparison" },
+    "12": { "category": "secrets-exposure",        "cwe": 798, "negative": false, "label": "Hardcoded DB root password" },
+    "13": { "category": "ssrf",                    "cwe": 918, "negative": false, "label": "SSRF via curl with user-supplied URL" },
+    "71": { "category": "sqli",                    "cwe": 89,  "negative": true,  "label": "SAFE: prepared statement with bind_param" },
+    "72": { "category": "xss",                     "cwe": 79,  "negative": true,  "label": "SAFE: htmlspecialchars" },
+    "73": { "category": "cmdi",                    "cwe": 78,  "negative": true,  "label": "SAFE: escapeshellarg" },
+    "74": { "category": "path-traversal",          "cwe": 22,  "negative": true,  "label": "SAFE: basename() to strip traversal" },
+    "75": { "category": "insecure-deserialization","cwe": 502, "negative": true,  "label": "SAFE: json_decode instead of unserialize" },
+    "76": { "category": "auth-weakness",           "cwe": 916, "negative": true,  "label": "SAFE: password_hash with bcrypt" },
+    "77": { "category": "secrets-exposure",        "cwe": 798, "negative": true,  "label": "SAFE: password from environment variable" },
+    "78": { "category": "ssrf",                    "cwe": 918, "negative": true,  "label": "SAFE: URL host validated against allowlist" }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "app":  "railsgoat",
+  "path": "railsgoat.rb",
+  "cases": {
+    "01": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via where() interpolation" },
+    "02": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via find_by_sql concatenation" },
+    "03": { "category": "authz-weakness",          "cwe": 915, "negative": false, "label": "Mass assignment — :admin parameter permitted" },
+    "04": { "category": "insecure-deserialization","cwe": 502, "negative": false, "label": "Insecure deserialization via Marshal.load" },
+    "05": { "category": "auth-weakness",           "cwe": 798, "negative": false, "label": "Hardcoded admin password in seed" },
+    "06": { "category": "template-injection",      "cwe": 94,  "negative": false, "label": "SSTI via ERB.new with user input" },
+    "07": { "category": "path-traversal",          "cwe": 22,  "negative": false, "label": "Path traversal via File.read with user path" },
+    "08": { "category": "auth-weakness",           "cwe": 208, "negative": false, "label": "Hardcoded API token + timing-unsafe compare" },
+    "09": { "category": "secrets-exposure",        "cwe": 798, "negative": false, "label": "Hardcoded S3 access key and secret" },
+    "10": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "XSS via raw html_safe on user input" },
+    "11": { "category": "authz-weakness",          "cwe": 639, "negative": false, "label": "Missing ownership check (BOLA) on Benefit" },
+    "71": { "category": "sqli",                    "cwe": 89,  "negative": true,  "label": "SAFE: parameterised where()" },
+    "72": { "category": "authz-weakness",          "cwe": 915, "negative": true,  "label": "SAFE: :admin not in permit list" },
+    "73": { "category": "insecure-deserialization","cwe": 502, "negative": true,  "label": "SAFE: JSON.parse instead of Marshal.load" },
+    "74": { "category": "template-injection",      "cwe": 94,  "negative": true,  "label": "SAFE: sanitize() before ERB" },
+    "75": { "category": "path-traversal",          "cwe": 22,  "negative": true,  "label": "SAFE: File.basename to strip traversal" },
+    "76": { "category": "secrets-exposure",        "cwe": 798, "negative": true,  "label": "SAFE: credentials from environment" },
+    "77": { "category": "xss",                     "cwe": 79,  "negative": true,  "label": "SAFE: CGI.escapeHTML before render" }
+  }
+}

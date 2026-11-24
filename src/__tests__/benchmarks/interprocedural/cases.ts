@@ -10,7 +10,7 @@
  */
 export interface InterproceduralCase {
   id: string;
-  language: "javascript" | "python" | "go" | "java";
+  language: "javascript" | "python" | "go" | "java" | "csharp" | "php";
   /** The name the file is scanned under (Java: the public class's file). */
   path: string;
   /** Finding ids that report this weakness. */
@@ -31,6 +31,10 @@ const GO = (id: string, ids: string[], source: string, sink: string, steps: stri
   ({ id, language: "go", path: `${id.toLowerCase().replace("-", "_")}.go`, ids, source, sink, steps, constant: `"fixed"` });
 const JAVA = (id: string, path: string, ids: string[], source: string, sink: string, steps: string[], constant = `"fixed"`): InterproceduralCase =>
   ({ id, language: "java", path, ids, source, sink, steps, constant });
+const CS = (id: string, ids: string[], source: string, sink: string, steps: string[]): InterproceduralCase =>
+  ({ id, language: "csharp", path: `${id.toUpperCase()}.cs`, ids, source, sink, steps, constant: `"fixed"` });
+const PHP = (id: string, ids: string[], source: string, sink: string, steps: string[]): InterproceduralCase =>
+  ({ id, language: "php", path: `${id.toUpperCase()}.php`, ids, source, sink, steps, constant: `"fixed"` });
 
 export const INTERPROCEDURAL_CASES: InterproceduralCase[] = [
   JS("JS-01", ["xss"], "req.query.term", `res.type("html").send(html)`, ["const model = {", "return `<h1>", "const html = render(model)"]),
@@ -58,4 +62,16 @@ export const INTERPROCEDURAL_CASES: InterproceduralCase[] = [
   JAVA("JAVA-03", "RedirectServlet.java", ["open-redirect"], `req.getParameter("next")`, "response.sendRedirect(target)", ["redirector.redirect(res, target)"]),
   JAVA("JAVA-04", "CommandServlet.java", ["command-injection"], `req.getParameter("value")`, "new ProcessBuilder(", ["values.add(input)", "new CommandService().execute(values)", "run(it.next())"]),
   JAVA("JAVA-05", "XmlServlet.java", ["xxe"], "new String(req.getInputStream().readAllBytes())", "builder.parse(", ["parse(xml);"]),
+
+  // C# interprocedural cases (task 10 — dedicated interprocedural tests for every language)
+  CS("CS-01", ["sql-injection"],  `req.Query["id"]`,           `cmd.ExecuteReader()`,        [`service.GetUser(id)`, `"SELECT * FROM Users WHERE Id = " + userId`]),
+  CS("CS-02", ["path-traversal"], `req.Query["name"]`,          `System.IO.File.ReadAllText(filePath)`, [`loader.Load(name)`, `System.IO.Path.Combine(_base, name)`]),
+  CS("CS-03", ["ssrf"],           `req.Query["url"].ToString()`, `_http.GetAsync(target)`,    [`adapter.Fetch(url)`, `return await _http.GetAsync(target)`]),
+  CS("CS-04", ["command-injection"], `req.Query["arg"].ToString()`, `proc.Start()`,           [`runner.Run(arg)`, `Arguments = "/c echo " + arg`]),
+
+  // PHP interprocedural cases
+  PHP("PHP-01", ["sql-injection"],  `$_GET['id']`,    `$db->query($query)`,   [`build_query($id)`, `"SELECT * FROM users WHERE id = '$id'"`]),
+  PHP("PHP-02", ["path-traversal"], `$_GET['page']`,  `include($path)`,       [`load_page($page)`, `$path = "/var/www/pages/" . $page`]),
+  PHP("PHP-03", ["command-injection"], `$_POST['host']`, `shell_exec($cmd)`,  [`make_cmd($host)`, `"ping -c1 " . $host`]),
+  PHP("PHP-04", ["xss"],            `$_GET['name']`,  `echo $html`,           [`render_greeting($name)`, `"<h1>Hello $name</h1>"`]),
 ];

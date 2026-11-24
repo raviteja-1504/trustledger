@@ -1,0 +1,19 @@
+// C# interprocedural case CS-03: SSRF via HttpClient through adapter layer
+// Source: req.Query["url"]  Sink: _http.GetAsync(target)
+// Steps: adapter.Fetch(url), return await _http.GetAsync(target)
+using Microsoft.AspNetCore.Http;
+using System.Net.Http;
+class HttpAdapter {
+    HttpClient _http = new();
+    public async System.Threading.Tasks.Task<string> Fetch(string target) {
+        var resp = await _http.GetAsync(target);
+        return await resp.Content.ReadAsStringAsync();
+    }
+}
+class ProxyController {
+    HttpAdapter adapter = new();
+    public async System.Threading.Tasks.Task<string> Get(HttpRequest req) {
+        var url = req.Query["url"].ToString();
+        return await adapter.Fetch(url);
+    }
+}

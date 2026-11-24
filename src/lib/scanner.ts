@@ -66,7 +66,7 @@ import type { SuppressedSink } from "./taint/taintCore";
 import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts, computeJavaSourceMethods, computeJavaPassThroughMethods, computeJavaConstantMethods, type PassThroughMethods } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
-  parseGoSourceSync, isGoParserReady, scanAstTaintGo, computeGoFuncSinkFacts,
+  parseGoSourceSync, isGoParserReady, scanAstTaintGo, computeGoFuncSinkFacts, computeGoPassThroughFunctions,
   findEnclosingFunctionNameGo, findNodeAtRowGo, astTaintGoSeverity, astTaintGoLabel,
 } from "./astTaintGo";
 import type { Node as GoSyntaxNode } from "web-tree-sitter";
@@ -125,6 +125,7 @@ import "./containerDetectors";
 import "./appsecDetectors";
 import { APPSEC_FIXES } from "./appsecRules";
 import { cweFor as cweEntryFor } from "./cweMap";
+import type { OwaspCategory } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
 import { scanLicenseContamination, dropProjectWideLicenseHeaders } from "./licenseContamination";
 import { isDockerfilePath } from "./scannableFiles";
@@ -135,6 +136,10 @@ import { summarizeAIAttribution, type AIAttributionSummary } from "./aiAttributi
 import { buildEvidenceGroups, type AIEvidenceReport } from "./aiEvidenceGroups";
 import { findCredentialAssignment, findLiteralCredentialUse } from "./credentialAssignments";
 import { findCredentialFileFormats } from "./credentialFiles";
+import {
+  resetStageAccumulator, recordStageTime, collectStageMetrics,
+  captureResourceSnapshot, recordCrossScanStageTotal,
+} from "./engineMetrics";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -163,6 +168,11 @@ export interface ScanIndicator {
   // more confident than a same-line keyword-co-occurrence regex, which is
   // more confident than a bare pattern match with no taint context at all.
   confidence?:  number;
+  // Human-readable confidence tier derived from the numeric score. Added by
+  // attachEvidence; absent only on indicators that never pass through that path.
+  confidenceLabel?: "confirmed" | "high-confidence" | "medium-confidence" | "low-confidence" | "needs-review";
+  // OWASP Top 10 (2021) category, derived from the CWE mapping (cweMap.ts).
+  owasp?: OwaspCategory;
   // "third_party" for a match inside vendored/minified code, "test_code" for
   // a match inside a test file -- both preserved as evidence but excluded
   // from risk-level escalation (see calculateRisk). hardcoded-secret and
@@ -378,7 +388,9 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
     /[Tt]est\.[a-z]+$/.test(lower) ||
     /^test_/.test(base) ||
     lower.endsWith("_test.go") ||
-    lower.endsWith("_test.rb");
+    lower.endsWith("_test.rb") ||
+    // files inside test/demo/e2e/example directories are test-code regardless of filename
+    /(?:^|\/)(?:e2e|demos?|examples?|__tests__|__mocks__|tests?|fixtures?|mocks?|specs?|stubs?)(?:\/|$)/i.test(filePath);
 
   return {
     skipAI:      false,
@@ -1197,7 +1209,7 @@ const CMD_INJECTION_RE = [
 ];
 
 /** Rules whose regex-layer findings are dropped on files a data-flow engine analysed (see analyzeFile). */
-export const ENGINE_OWNED_RULES: ReadonlySet<string> = new Set(["ssrf"]);
+export const ENGINE_OWNED_RULES: ReadonlySet<string> = new Set(["ssrf", "command-injection"]);
 
 const SSRF_RE = [
   /(?:fetch|axios\.(?:get|post|put|delete|patch))\s*\(\s*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
@@ -2287,12 +2299,23 @@ function findPHPPharDeserialization(lines: string[]): ScanIndicator[] {
 // Go md5/sha1 are used as non-security checksums (ETag, cache key, file dedup) often enough that a
 // flat match generates excessive false positives. These keywords in the same line indicate a
 // non-security use; `usedforsecurity` is not a Go concept so we rely on naming context instead.
-const GO_HASH_CACHE_CONTEXT_RE = /\b(?:cache|etag|e_tag|checksum|check_sum|fingerprint|dedup|content_hash|hash_key|cacheKey|hashKey|digest_key|bucket|shard|partition|s3key|object_key|b2key|blob_key)\b/i;
+const GO_HASH_CACHE_CONTEXT_RE = /\b(?:cache|etag|e_tag|checksum|check_sum|fingerprint|dedup|content_hash|hash_key|cache_key|get_cache|cacheKey|hashKey|digest_key|bucket|shard|partition|s3key|object_key|b2key|blob_key)\b|(?:^|_)cache(?:_|$)/i;
 const GO_WEAK_HASH_RE = /\b(?:md5|sha1)\.(?:New|Sum)\s*\(/;
 
+// JS/Python md5/sha1 non-security use: same context words used by the Go gate.
+const JS_PY_WEAK_HASH_RE = /\bcreateHash\s*\(\s*["'](?:md5|sha1)["']|hashlib\.(?:md5|sha1)\s*\(/i;
+
 function findWeakCrypto(lines: string[]): ScanIndicator[] {
-  const found = runDetector(lines, WEAK_CRYPTO_RE, "weak-crypto", "Weak Cryptography", "high",
+  const foundRaw = runDetector(lines, WEAK_CRYPTO_RE, "weak-crypto", "Weak Cryptography", "high",
     "MD5/SHA1/DES/ECB — broken algorithms or insufficient bcrypt rounds; use SHA-256+/AES-CBC/bcrypt≥12");
+  // JS/Python md5/sha1: suppress when the line (or the two surrounding lines) indicates a non-security use
+  // (cache key, ETag, dedup) — same gate as the Go md5/sha1 path below.
+  const found = foundRaw.filter(f => {
+    const idx = (f.line ?? 1) - 1;
+    if (!JS_PY_WEAK_HASH_RE.test(lines[idx] ?? "")) return true;
+    const ctx = lines.slice(Math.max(0, idx - 1), idx + 2).join(" ");
+    return !GO_HASH_CACHE_CONTEXT_RE.test(ctx);
+  });
   // Go md5/sha1: suppress when the line (or the two surrounding lines) indicates a non-security checksum use.
   for (let i = 0; i < lines.length; i++) {
     if (!GO_WEAK_HASH_RE.test(lines[i])) continue;
@@ -2482,11 +2505,36 @@ function sqlInterpolatesOnlyPlaceholders(lines: string[], idx: number): boolean 
   });
 }
 
+const TAGGED_SQL_OPEN_RE = /(?:\bsql|\$queryRaw|\$executeRaw|Prisma\.sql|db\.sql)\s*`/;
+
+/** Returns true when lineIdx is inside a multi-line sql`…`/$queryRaw`…` tagged template whose
+ * opening backtick was on an earlier line. The same-line case is excluded by SQL_INJECTION_RE's
+ * own negative lookahead; this catches inner lines like `  SELECT * FROM ${table}`. */
+function isInsideTaggedSqlTemplate(lines: string[], lineIdx: number): boolean {
+  // Scan backward up to 15 lines for an unclosed tagged-template opener.
+  for (let i = lineIdx - 1; i >= 0 && i >= lineIdx - 15; i--) {
+    const line = lines[i];
+    if (!TAGGED_SQL_OPEN_RE.test(line)) continue;
+    // Found a tagged-template opener on line i. Count backticks after the opening ` to see if the
+    // template was closed before lineIdx. A simplistic count: unescaped backticks close the template.
+    const afterOpen = lines.slice(i, lineIdx).join("\n");
+    const openPos = afterOpen.search(TAGGED_SQL_OPEN_RE);
+    if (openPos < 0) continue;
+    // Count backticks after the tagged-template backtick up to (but not including) lineIdx's content
+    const fragment = afterOpen.slice(openPos + afterOpen.match(TAGGED_SQL_OPEN_RE)![0].length);
+    const backticks = (fragment.match(/(?<!\\)`/g) ?? []).length;
+    // Even count means template is still open (0 closing backticks = open; 2 = closed then reopened etc.)
+    if (backticks % 2 === 0) return true;
+  }
+  return false;
+}
+
 function findSQLInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, SQL_INJECTION_RE, "sql-injection", "SQL Injection", "critical",
     "Query built with string interpolation — use parameterised queries")
     .filter(f => !sqlConcatOnlyNumbers(lines, (f.line ?? 1) - 1))
-    .filter(f => !sqlInterpolatesOnlyPlaceholders(lines, (f.line ?? 1) - 1));
+    .filter(f => !sqlInterpolatesOnlyPlaceholders(lines, (f.line ?? 1) - 1))
+    .filter(f => !isInsideTaggedSqlTemplate(lines, (f.line ?? 1) - 1));
 }
 
 // PHP-specific: unlike JS/Python, PHP interpolates a bare $var or {$var}
@@ -3806,6 +3854,9 @@ function findWeakHashPython(lines: string[]): ScanIndicator[] {
     if (isNonExecutableLine(line) || !(PY_WEAK_HASH_RE.test(line) || (bareRe?.test(line) && !/^\s*(?:from|import)\b/.test(line)))) continue;
     if (WEAK_CRYPTO_RE.some(r => r.test(line))) continue;   // the password-context rule already reports it
     if (/usedforsecurity\s*=\s*False/.test(line)) continue;
+    // non-security checksum context (cache key, ETag, dedup) -- same gate as the Go / JS paths
+    const ctx2 = lines.slice(Math.max(0, i - 1), i + 2).join(" ");
+    if (GO_HASH_CACHE_CONTEXT_RE.test(ctx2)) continue;
     found.push({ id: "weak-crypto", label: "Weak Cryptographic Hash", severity: "medium", line: i + 1,
       detail: "MD5/SHA-1 are collision-broken -- use SHA-256 or stronger (and a slow KDF such as hashlib.scrypt or argon2 for passwords); pass usedforsecurity=False for a non-security checksum" });
   }
@@ -3822,16 +3873,16 @@ const PHP_WEAK_CIPHER_RE = /\bopenssl_(?:encrypt|decrypt)\s*\((?:[^()]|\([^()]*\
 
 // Keywords that, when found in a comment near the CBC call, indicate the cipher mode
 // is dictated by an external protocol or compatibility requirement (not a free choice).
-const CBC_PROTOCOL_MANDATE_RE = /\b(?:legacy|compat|migrat|pkcs|pbes|interop|partner|payment|gateway|mandate|required\s+by|rfc\s*\d+|fips|backcompat|backward|cipher.?suite)\b/i;
+const CBC_PROTOCOL_MANDATE_RE = /\b(?:legacy|compat|migrat|pkcs|pbes|interop|partner|payment|gateway|mandate|required\s+by|rfc\s*\d+|fips|backcompat|backward|cipher.?suite|tls|dtls|ssl|openssl|pgp|smime|s.mime|ipsec|wpa2?|wpa3|pci|saml|xmlenc|xmlsec|xmlcrypt|openid|oauth|kerberos|openpgp|gpg|bitlocker|luks|ecies|comply|complian|regulated|standard|protocol|spec|draft)\b/i;
 
-/** True when a comment in the 3 lines before (or on) the CBC/CFB/OFB call documents a
+/** True when a comment in the 5 lines before (or on) the CBC/CFB/OFB call documents a
  *  protocol mandate, so the developer cannot simply switch to GCM. Covers whole-line
- *  comments (`# ...`, `// ...`) and inline trailing comments on any line. */
+ *  comments (# ..., // ..., block comments) and inline trailing comments on any line. */
 function cbcIsProtocolMandated(lines: string[], i: number): boolean {
-  for (let j = Math.max(0, i - 3); j <= i; j++) {
+  for (let j = Math.max(0, i - 5); j <= i; j++) {
     const t = lines[j];
-    if (/^\s*[#/]/.test(t) && CBC_PROTOCOL_MANDATE_RE.test(t)) return true;
-    const afterComment = (/(?:\/\/|#)(.*)/.exec(t) ?? [])[1] ?? "";
+    if (/^\s*(?:[#/]|\/\*)/.test(t) && CBC_PROTOCOL_MANDATE_RE.test(t)) return true;
+    const afterComment = (/(?:\/\/|#|\/\*)(.*)/.exec(t) ?? [])[1] ?? "";
     if (afterComment && CBC_PROTOCOL_MANDATE_RE.test(afterComment)) return true;
   }
   return false;
@@ -4883,7 +4934,11 @@ function findInsecureFileUploadJava(lines: string[]): ScanIndicator[] {
 
 // TOCTOU: check-then-act race (existsSync/statSync followed by fs operation within 10 lines on the SAME path).
 // Requiring the same path variable prevents false positives where unrelated file ops happen near a stat call.
+// Also requires the path variable to be request-tainted: build tools and CLI scripts routinely do
+// existsSync(configPath) + readFile(configPath) on constant/derived paths — that's not a security race.
 function findTOCTOU(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
   const found: ScanIndicator[] = [];
   const seen = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
@@ -4894,6 +4949,8 @@ function findTOCTOU(lines: string[]): ScanIndicator[] {
     const pathArg = srcM[1].trim();
     const pathId = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/.exec(pathArg)?.[0];
     if (!pathId) continue;
+    // Only flag when the path is request-derived; constant/config paths are not attacker-controlled.
+    if (!tainted.has(pathId.split(".")[0])) continue;
     const samePathRe = new RegExp(`\\b${pathId.replace(/\./g, "\\.")}\\b`);
     for (let j = i + 1; j < Math.min(lines.length, i + 10); j++) {
       if (TOCTOU_SINK_RE.test(lines[j]) && samePathRe.test(lines[j])) {
@@ -8069,15 +8126,30 @@ function baseConfidence(ind: ScanIndicator): number {
 // are preserved as evidence without driving the file's own risk_score
 // (calculateRisk excludes them). Secrets are always "application": a real
 // leaked key in a vendor bundle or test fixture is still a real leaked key.
+function confidenceLabelFor(c: number): ScanIndicator["confidenceLabel"] {
+  if (c >= 95) return "confirmed";
+  if (c >= 85) return "high-confidence";
+  if (c >= 70) return "medium-confidence";
+  if (c >= 50) return "low-confidence";
+  return "needs-review";
+}
+
 function attachEvidence(indicators: ScanIndicator[], category: "application" | "third_party" | "test_code"): ScanIndicator[] {
-  return indicators.map(ind => ({
-    ...ind,
-    cwe:          ind.cwe ?? cweFor(ind.id),
-    confidence:   ind.confidence ?? baseConfidence(ind),
-    codeCategory: category !== "application" && ind.id !== "hardcoded-secret" && ind.id !== "high-entropy-secret"
-      ? category
-      : "application" as const,
-  }));
+  return indicators.map(ind => {
+    const cwe = ind.cwe ?? cweFor(ind.id);
+    const confidence = ind.confidence ?? baseConfidence(ind);
+    const cweFull = cweEntryFor(ind.id);
+    return {
+      ...ind,
+      cwe,
+      confidence,
+      confidenceLabel: ind.confidenceLabel ?? confidenceLabelFor(confidence),
+      owasp: ind.owasp ?? cweFull?.owasp,
+      codeCategory: category !== "application" && ind.id !== "hardcoded-secret" && ind.id !== "high-entropy-secret"
+        ? category
+        : "application" as const,
+    };
+  });
 }
 
 // ── Line-level AI attribution ─────────────────────────────────────────────────
@@ -8458,12 +8530,13 @@ function findAstTaintJavaFindings(
 function findAstTaintGoFindings(
   content: string, filePath: string, rootNode: GoSyntaxNode, lines: string[], suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+  crossFileShapes?: ReadonlyMap<string, readonly [number, number][]>,
 ): ScanIndicator[] {
   const idorAuthCheckNearby = (line: number) => {
     const windowStart = Math.max(0, line - 1 - 15);
     return lines.slice(windowStart, line).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l));
   };
-  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed, { crossFileFacts }).map(f => ({
+  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed, { crossFileFacts, crossFileShapes }).map(f => ({
     id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
@@ -8628,8 +8701,8 @@ export function analyzeFile(
   crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string>; sourceMethods?: ReadonlyMap<string, number>; passMethods?: PassThroughMethods; constantMethods?: ReadonlySet<string> },
   // Same, for C# (see astTaintCSharp.ts computeCSharpMethodSinkFacts).
   crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; callerArgs?: ReadonlyMap<string, ReadonlyMap<number, number>> },
-  // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts).
-  crossFileGo?: { tree?: GoSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts / computeGoPassThroughFunctions).
+  crossFileGo?: { tree?: GoSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; passMethods?: ReadonlyMap<string, readonly [number, number][]> },
   // Same, for PHP functions from files this one includes (see astTaintPHP.ts computePhpFunctionSinkFacts).
   crossFilePhp?: { tree?: PhpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Same, for Ruby (Rails controllers -> services/models in other files), keyed Class.method / Class#method.
@@ -8703,6 +8776,7 @@ export function analyzeFile(
   // runScan(), when this file had cross-file imports to resolve) is reused
   // here rather than parsing again. Parsed at most once and reused below for
   // both the taint scan and the exploitability reachability resolver.
+  const _astParseT0 = Date.now();
   const tsSourceFile: ts.SourceFile | null =
     dataFlowOff ? null : presparsedTs ?? (shouldAstParse(content, file_path) ? parseSourceFile(content, file_path) : null);
   // Python AST parse (Phase 2 -- see astTaintPython.ts). isPythonParserReady()
@@ -8768,6 +8842,7 @@ export function analyzeFile(
     (lang === "c" || lang === "cpp") && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isCppParserReady()
       ? (crossFileCpp?.tree ?? parseCppSourceSync(content, file_path))
       : null;
+  recordStageTime("ast-parse", Date.now() - _astParseT0);
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -8788,11 +8863,12 @@ export function analyzeFile(
   // positives the engine merely failed to see. AST findings themselves are
   // never filtered here.
   const suppressedSinks: SuppressedSink[] = [];
+  const _taintT0 = Date.now();
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources, crossFilePyPassMethods) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods, crossFileJava?.passMethods, crossFileJava?.constantMethods) : []),
-    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
+    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts, crossFileGo?.passMethods) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts, crossFileCSharp?.callerArgs) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
     ...(rubyTree ? findAstTaintRubyFindings(content, file_path, rubyTree, suppressedSinks, crossFileRuby?.facts) : []),
@@ -8800,7 +8876,9 @@ export function analyzeFile(
     ...(rustTree ? findAstTaintRustFindings(content, file_path, rustTree, suppressedSinks, crossFileRust?.facts) : []),
     ...(cppTree ? findAstTaintCppFindings(content, file_path, cppTree, suppressedSinks, crossFileCpp?.facts) : []),
   ];
+  recordStageTime("taint-propagation", Date.now() - _taintT0);
   // Comment and displayed-only text blanked: see codeOnlyLines.
+  const _vulnT0 = Date.now();
   const codeLines = codeOnlyLines(content, lines, file_path, tsSourceFile);
   const regexVulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(codeLines),
@@ -9033,6 +9111,7 @@ export function analyzeFile(
   }
   // (Fingerprints are assigned further down, once EVERY indicator -- AI signals, attribution, watermark,
   // behavioral, supply-chain -- exists and the enclosing-function resolver is defined. See findingIdentity.ts.)
+  recordStageTime("vuln-detection", Date.now() - _vulnT0);
 
   // AI detection — skipped for config/generated files
   let ai_percentage    = 0;
@@ -9042,7 +9121,9 @@ export function analyzeFile(
 
   // Model attribution (computed early so its human-evidence signal can
   // dampen the structural ai_percentage score below).
+  const _attrT0 = Date.now();
   const attribution = attributeCode(content, lang);
+  recordStageTime("ai-attribution", Date.now() - _attrT0);
 
   if (!skipAI) {
     // Compute style drift (recursive call to computeAIPercentage — safe because drift score is 0 inside)
@@ -9122,7 +9203,9 @@ export function analyzeFile(
   // falls inside, per-indicator -- see scoreExploitability's own docblock
   // for why a single containingFunction string could never have been
   // correct even with a real (non-"unknown") value plugged in.
+  const _cgT0 = Date.now();
   const callGraph   = !skipAI ? buildCallGraph(content) : null;
+  recordStageTime("call-graph", Date.now() - _cgT0);
   // Cross-file reachability bridge (Decision 1): union in names this file
   // exports that runScan() already determined are called from a reachable
   // function in another JS/TS file -- see this function's own
@@ -9176,9 +9259,11 @@ export function analyzeFile(
     const pos = tsSourceFile.getPositionOfLineAndCharacter(Math.max(0, line - 1), 0);
     return isInsideRouteCallback(findNodeAtPosition(tsSourceFile, pos)) ? ROUTE_HANDLER : name;
   };
+  const _reachT0 = Date.now();
   const exploitability = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0
     ? scoreExploitability(indicators, content, callGraph, resolveReachabilityFunction)
     : null;
+  recordStageTime("reachability", Date.now() - _reachT0);
 
   // Merge per-instance reachability back onto `indicators` -- the same array
   // object returned below as FileAnalysis.indicators, which every downstream
@@ -9208,7 +9293,9 @@ export function analyzeFile(
   }
 
   // Compliance evaluation
+  const _complianceT0 = Date.now();
   const compliance = evaluateCompliance(content, file_path);
+  recordStageTime("compliance", Date.now() - _complianceT0);
 
   // ── v7: Structural AST analysis ────────────────────────────────────────────
   const astResult   = parseAst(content, lang);
@@ -9221,6 +9308,7 @@ export function analyzeFile(
   // ssaSelection.ts for the ranking and the line budget that replaced the fixed count.
   const ssa_taint_paths: TaintPath[] = [];
   const securityIndicators = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id));
+  const _ssaT0 = Date.now();
   if (securityIndicators.length > 0) {
     const topFuncs = selectSsaFunctions(astResult.functions, securityIndicators.map(i => ({ line: i.line, severity: i.severity })));
     for (const fn of topFuncs) {
@@ -9229,6 +9317,7 @@ export function analyzeFile(
       for (const tp of ssaResult.taintPaths) ssa_taint_paths.push(tp);
     }
   }
+  recordStageTime("ssa", Date.now() - _ssaT0);
 
   // ML classifier — independent probability estimate
   const ml_score = !skipAI
@@ -9243,6 +9332,14 @@ export function analyzeFile(
     [rubyTree, !crossFileRuby?.tree], [kotlinTree, !crossFileKotlin?.tree], [rustTree, !crossFileRust?.tree], [cppTree, !crossFileCpp?.tree],
   ] as const) {
     if (root && owned) freeSyntaxTree(root);
+  }
+
+  // Stamp confidenceLabel on any indicators that bypassed attachEvidence (AI signals, watermarks, etc.)
+  for (const ind of indicators) {
+    if (ind.confidenceLabel) continue;
+    const c = ind.confidence ?? baseConfidence(ind);
+    if (!ind.confidence) ind.confidence = c;
+    ind.confidenceLabel = confidenceLabelFor(c);
   }
 
   return {
@@ -9775,6 +9872,24 @@ function collectJavaPassThroughMethods(
   return out;
 }
 
+function collectGoPassThroughFunctions(
+  trees: ReadonlyMap<string, GoSyntaxNode>, files: readonly { path: string; content: string }[],
+): Map<string, [number, number][]> {
+  const out = new Map<string, [number, number][]>();
+  if (trees.size < 2) return out;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  for (const [path, tree] of trees) {
+    const content = contentOf.get(path);
+    if (!content) continue;
+    for (const [key, shapes] of computeGoPassThroughFunctions(content, path, tree)) {
+      const merged = new Map(out.get(key) ?? []);
+      for (const [i, surviving] of shapes) merged.set(i, (merged.get(i) ?? 0) | surviving);
+      out.set(key, [...merged].sort((a, b) => a[0] - b[0]));
+    }
+  }
+  return out;
+}
+
 const callerArgsDigest =(m: ReadonlyMap<string, ReadonlyMap<number, number>>): string =>
   JSON.stringify([...m].map(([k, v]) => [k, [...v].sort((a, b) => a[0] - b[0])] as const).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 
@@ -9908,6 +10023,7 @@ function convergePhpIncludeFacts(
 
 export function runScan(input: ScanInput): ScanOutput {
   const start = Date.now();
+  resetStageAccumulator();
 
   // Incremental scanning (see incrementalCache.ts). EVERY provided file participates in the cross-file
   // import graph / semantic graph / aggregates -- what a valid cache entry skips is only the expensive
@@ -9943,6 +10059,7 @@ export function runScan(input: ScanInput): ScanOutput {
   })();
 
   // ── Cross-file taint analysis, Pass 1: per-file export summaries (JS/TS) ──
+  const _crossFileT0 = Date.now();
   // Runs BEFORE the main analyzeFile() loop below so Pass 2 (inside
   // analyzeFile, via scanAstTaint) can see cross-file-propagating calls
   // while it walks each file for real. Parses each eligible file once here;
@@ -10331,6 +10448,7 @@ export function runScan(input: ScanInput): ScanOutput {
     }
   }
   const goFacts = convergeServiceFacts(goTrees, allFiles, computeGoFuncSinkFacts);
+  const goPassMethods = collectGoPassThroughFunctions(goTrees, allFiles);
   const goFactsDigest = goFacts.size > 0 ? factsDigest(goFacts) : "";
 
   // PHP: functions from statically included files (see convergePhpIncludeFacts).
@@ -10390,6 +10508,8 @@ export function runScan(input: ScanInput): ScanOutput {
   // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
   // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
   // what makes an unchanged caller re-analyze when its callee changed.
+  recordStageTime("cross-file", Date.now() - _crossFileT0);
+
   const file_cache: Record<string, CachedFileResult> = {};
   let skipped_unchanged = 0;
   const perFileStart = Date.now();
@@ -10427,7 +10547,7 @@ export function runScan(input: ScanInput): ScanOutput {
           pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
           javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere, sourceMethods: javaSourceMethods, passMethods: javaPassMethods, constantMethods: javaConstantMethods } : undefined,
           csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts, callerArgs: csCallerArgs } : undefined,
-          goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
+          goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts, passMethods: goPassMethods.size > 0 ? goPassMethods : undefined } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,
           rubyTrees.has(f.path) ? { tree: rubyTrees.get(f.path), facts: rubyFacts } : undefined,
           kotlinTrees.has(f.path) ? { tree: kotlinTrees.get(f.path), facts: javaFacts } : undefined,
@@ -10781,15 +10901,33 @@ export function runScan(input: ScanInput): ScanOutput {
   ];
   const end = Date.now();
   const health = summarizeHealth(gaps, CURRENT_ENGINE_VERSION);
+
+  // ── Task 9: collect engine-stage metrics and populate extended telemetry ──
+  const engine_stages = collectStageMetrics();
+  const resource_snapshot = captureResourceSnapshot();
+  // Record scan totals in the rolling cross-scan window (P50/P95/P99 across recent scans).
+  for (const [stage, metrics] of Object.entries(engine_stages) as Array<[import("./scanHealth").EngineStage, import("./scanHealth").EngineStageMetrics]>) {
+    recordCrossScanStageTotal(stage, metrics.total_ms);
+  }
+  resetStageAccumulator();
+
+  const totalFiles = allFiles.length;
   const telemetry: ScanTelemetry = {
     engine_version: CURRENT_ENGINE_VERSION,
     total_ms: end - start,
     cross_file_ms: perFileStart - start,
     per_file_ms: perFileEnd - perFileStart,
     post_ms: end - perFileEnd,
-    files_analyzed: allFiles.length - skipped_unchanged,
+    files_analyzed: totalFiles - skipped_unchanged,
     files_reused: skipped_unchanged,
     slowest: slowestFiles(fileTimings),
+    // Task 9 extended fields
+    engine_stages,
+    resource_snapshot,
+    cache_hit_rate: totalFiles > 0 ? skipped_unchanged / totalFiles : 0,
+    parser_failures: health.gap_counts["parse-failed"] ?? 0,
+    timeout_counts:  health.gap_counts["time-budget"] ?? 0,
+    coverage_incomplete: health.status !== "complete",
   };
 
   return {

@@ -55,6 +55,31 @@ describe("tagged-template SQL is parameterized", () => {
   it("an untagged template with the same text is still reported", () => {
     expect(ids("lib/search.ts", `export async function find(prisma: any, q: string) {\n  const text = \`SELECT id FROM "Post" WHERE title ILIKE '\${q}' ORDER BY id\`;\n  return prisma.$queryRawUnsafe(text);\n}\n`)).toContain("sql-injection");
   });
+  it("multi-line sql`...` with ${table} on a separate inner line is not reported", () => {
+    const content = [
+      `import { sql } from "drizzle-orm";`,
+      `async function getRows(db: any, table: string, id: number) {`,
+      `  return db.execute(sql\``,
+      `    SELECT * FROM \${table}`,
+      `    WHERE id = \${id}`,
+      `  \`);`,
+      `}`,
+    ].join("\n");
+    expect(ids("lib/db.ts", content)).not.toContain("sql-injection");
+  });
+  it("multi-line $queryRaw`...` inner lines are not reported", () => {
+    const content = [
+      `import { PrismaClient } from "@prisma/client";`,
+      `const prisma = new PrismaClient();`,
+      `async function search(q: string) {`,
+      `  return prisma.$queryRaw\``,
+      `    SELECT id, title FROM posts`,
+      `    WHERE title ILIKE \${q}`,
+      `  \`;`,
+      `}`,
+    ].join("\n");
+    expect(ids("lib/search.ts", content)).not.toContain("sql-injection");
+  });
 });
 
 describe("the request's own address is not a destination", () => {
@@ -82,6 +107,25 @@ describe("a fixed-host URL held in a variable is judged by position", () => {
   const u = id ? \`https://\${host}/a\` : \`https://api.github.com/b\`;
   await fetch(u);
   return NextResponse.json({ ok: true });`))).toContain("ssrf");
+  });
+});
+
+describe("client-side fetch of same-origin path is not SSRF", () => {
+  const reactComponent = (body: string) =>
+    `import React, { useEffect } from "react";\nexport default function Page() {\n  useEffect(() => {\n${body}\n  }, []);\n  return <div />;\n}\n`;
+
+  it("fetch(location.pathname) in a React component is not SSRF", () => {
+    const content = reactComponent(`    fetch(location.pathname).then(r => r.json());`);
+    expect(ids("src/pages/Page.tsx", content)).not.toContain("ssrf");
+  });
+
+  it("fetch(window.location.pathname) in a React component is not SSRF", () => {
+    const content = reactComponent(`    const path = window.location.pathname;\n    fetch(path).then(r => r.json());`);
+    expect(ids("src/components/Widget.tsx", content)).not.toContain("ssrf");
+  });
+
+  it("server route that fetches req.query value IS still SSRF (not client-side)", () => {
+    expect(ids("app/api/p/route.ts", route(`  const url = new URL(req.url).searchParams.get("url") ?? "";\n  const r = await fetch(url);\n  return NextResponse.json({ s: r.status });`))).toContain("ssrf");
   });
 });
 

@@ -1,0 +1,376 @@
+{
+  "scanner_version": "25.6",
+  "rule_pack_version": "1.0.0",
+  "generated_at": "2026-11-24T14:11:07.850Z",
+  "by_app": {
+    "juiceshop": {
+      "sqli": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "cmdi": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "xss": {
+        "precision": 1,
+        "recall": 0.5,
+        "f1": 0.6666666666666666,
+        "tp": 2,
+        "fn": 2
+      },
+      "ssrf": {
+        "precision": 0.5,
+        "recall": 1,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 0
+      },
+      "path-traversal": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "auth-weakness": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "prototype-pollution": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "redos": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "secrets-exposure": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      }
+    },
+    "vulnbench": {
+      "sqli": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "cmdi": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "xss": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "ssrf": {
+        "precision": 0.6666666666666666,
+        "recall": 1,
+        "f1": 0.8,
+        "tp": 2,
+        "fn": 0
+      },
+      "path-traversal": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "auth-weakness": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "template-injection": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 1
+      },
+      "secrets-exposure": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      }
+    },
+    "dvwa": {
+      "sqli": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 3,
+        "fn": 0
+      },
+      "cmdi": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "xss": {
+        "precision": 1,
+        "recall": 0.5,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 1
+      },
+      "ssrf": {
+        "precision": 0.5,
+        "recall": 1,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 0
+      },
+      "path-traversal": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "insecure-deserialization": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "auth-weakness": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "secrets-exposure": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      }
+    },
+    "railsgoat": {
+      "sqli": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "xss": {
+        "precision": 0.5,
+        "recall": 1,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 0
+      },
+      "path-traversal": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "insecure-deserialization": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "auth-weakness": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 2
+      },
+      "authz-weakness": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 2
+      },
+      "template-injection": {
+        "precision": 0.5,
+        "recall": 1,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 0
+      },
+      "secrets-exposure": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      }
+    },
+    "govwa": {
+      "sqli": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "cmdi": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "xss": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 1
+      },
+      "ssrf": {
+        "precision": 0.6666666666666666,
+        "recall": 1,
+        "f1": 0.8,
+        "tp": 2,
+        "fn": 0
+      },
+      "path-traversal": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "auth-weakness": {
+        "precision": 1,
+        "recall": 0.5,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 1
+      },
+      "template-injection": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "secrets-exposure": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 1
+      }
+    },
+    "dvcsharp": {
+      "sqli": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 2,
+        "fn": 0
+      },
+      "cmdi": {
+        "precision": 0.5,
+        "recall": 1,
+        "f1": 0.6666666666666666,
+        "tp": 1,
+        "fn": 0
+      },
+      "xss": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "ssrf": {
+        "precision": 0.6666666666666666,
+        "recall": 1,
+        "f1": 0.8,
+        "tp": 2,
+        "fn": 0
+      },
+      "path-traversal": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "insecure-deserialization": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "auth-weakness": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 2
+      },
+      "authz-weakness": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      },
+      "redos": {
+        "precision": 1,
+        "recall": 0,
+        "f1": 0,
+        "tp": 0,
+        "fn": 1
+      },
+      "secrets-exposure": {
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "tp": 1,
+        "fn": 0
+      }
+    }
+  }
+}

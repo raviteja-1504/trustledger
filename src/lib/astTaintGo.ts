@@ -108,6 +108,10 @@ export interface AstTaintGoFinding {
 export interface GoScanOptions {
   /** `pkg.Func` / `pkg.Type.Method` -> the parameter -> sink facts of that exported function in another file. */
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
+  /** `pkg.Func` / `pkg.Type.Method` -> [(paramIndex, survivingMask)] for functions whose return value carries
+   * taint from a parameter. Computed by collectGoPassThroughFunctions in scanner.ts; enables tracking taint
+   * through cross-package helper calls like `q := store.BuildQuery(id)` → `db.Exec(q)`. */
+  crossFileShapes?: ReadonlyMap<string, readonly [number, number][]>;
   /** Summary mode: skip the whole-file walk and instead walk each listed declaration with only parameter
    * `index` seeded (index -1 = nothing seeded, the baseline); results land in `seedResults`, one per run. */
   seedRuns?: Array<{ decl: SyntaxNode; index: number }>;
@@ -1455,7 +1459,10 @@ function isFormatCall(text: string): boolean {
 // injectable) while keeping the CONTROL bit, which is exactly what the IDOR
 // check asks for -- no special case needed at the IDOR site beyond its class.
 
-function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: PropagatingGo, sticky?: Map<string, number>) {
+function makeTaintMaskGo(
+  localFns: Map<string, LocalFn>, propagating: PropagatingGo, sticky?: Map<string, number>,
+  crossPackageMask?: (fn: SyntaxNode, args: SyntaxNode[], maskOf: (n: SyntaxNode, e: Env) => number, env: Env) => number,
+) {
   let fnValueDepth = 0;
   const orArgs = (args: SyntaxNode[], env: Env): number =>
     args.reduce((m, a) => (a.type === "func_literal" ? m : m | taintMask(a, env)), 0);
@@ -1511,6 +1518,12 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
         }
       }
       if (m) return m;
+    }
+    // Cross-file return-value shapes: a call to an imported pkg.Func whose param propagates to its return value.
+    // Checked after same-file local functions so a local override is preferred, before selector passthrough below.
+    if (crossPackageMask && fn) {
+      const cm = crossPackageMask(fn, args, taintMask, env);
+      if (cm) return cm;
     }
     // calling a value: an IIFE / `f()()` / a closure held in a variable returns what it captured;
     // calling a callback PARAMETER is (recall-biased) as tainted as what it is called with
@@ -2293,6 +2306,9 @@ interface WalkHooksGo {
   onDead?: (node: SyntaxNode) => void;
   /** Called for every visited node with the env at that point (string shapes, comparisons, mutation recording). */
   onNode?: (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => void;
+  /** Cross-file return-value shapes: given a cross-package call's fn node, args, maskOf, and env, returns the
+   * propagated taint class mask (0 when no cross-file shape applies). Set by scanAstTaintGo from crossFileShapes. */
+  crossPackageMask?: (fn: SyntaxNode, args: SyntaxNode[], maskOf: (n: SyntaxNode, e: Env) => number, env: Env) => number;
 }
 
 function paramNamesOfGo(fn: SyntaxNode): string[] {
@@ -2308,7 +2324,7 @@ function paramNamesOfGo(fn: SyntaxNode): string[] {
 }
 
 function createWalkerGo(h: WalkHooksGo) {
-  const taintMask = makeTaintMaskGo(h.localFns, h.propagating, h.sticky);
+  const taintMask = makeTaintMaskGo(h.localFns, h.propagating, h.sticky, h.crossPackageMask);
   // >0 while walking an immediately-invoked / go / defer literal in the CURRENT scope (its returns are not ours)
   let inline = 0;
   // Names bound by a validating statement (`_, ok := allowed[x]`), per function.
@@ -2816,6 +2832,7 @@ export function scanAstTaintGo(
     const root = presparsed ?? parseGoSourceSync(content, filePath);
     if (!root) return [];
     const crossFileFacts = opts?.crossFileFacts;
+    const crossFileShapes = opts?.crossFileShapes;
     // Import local name -> the imported package's last path segment (Go's default package name, which is
     // what a cross-package summary is keyed by). `.` and `_` imports bind no qualifier.
     const importedPkgs = new Map<string, string>();
@@ -2828,7 +2845,7 @@ export function scanAstTaintGo(
     const qualifiedVarTypes = new Map<string, string>();
     // Struct field -> `pkg.Type` (`type Server struct { Store *models.Store }`, then `s.Store.Find(x)`).
     const qualifiedFieldTypes = new Map<string, string>();
-    if (crossFileFacts && crossFileFacts.size > 0) {
+    if ((crossFileFacts && crossFileFacts.size > 0) || (crossFileShapes && crossFileShapes.size > 0)) {
       for (const spec of findAllNodesGo(root, "import_spec")) {
         const path = goStringLiteralValue(spec.childForFieldName("path") ?? spec) ?? "";
         const seg = path.split("/").pop() ?? "";
@@ -3130,7 +3147,30 @@ export function scanAstTaintGo(
     // A call whose tainted argument reaches a sink inside another package's exported function.
     const checkCrossPackageCall = (node: SyntaxNode, fn: SyntaxNode, args: readonly SyntaxNode[], env: Env, taintMask: TaintMaskFnGo) => {
       const key = crossPackageKey(fn);
-      const list = key ? crossFileFacts?.get(key) : undefined;
+      let list = key ? crossFileFacts?.get(key) : undefined;
+      // Interface dispatch fallback: when the receiver is typed as an interface (e.g. db.Repo), the exact key
+      // "db.Repo.FindByName" is not in facts (which are keyed by the concrete type "db.PgRepo.FindByName").
+      // Fall back to any fact in the same package with the same method name, covering all concrete impls.
+      if (!list && key && crossFileFacts) {
+        const methodDot = key.lastIndexOf(".");
+        if (methodDot > 0) {
+          const methodName = key.slice(methodDot + 1);
+          const typePartKey = key.slice(0, methodDot);
+          const typeDot = typePartKey.lastIndexOf(".");
+          if (typeDot >= 0) {
+            const pkgPrefix = typePartKey.slice(0, typeDot + 1); // "pkg." or "dir::pkg."
+            const suffix = "." + methodName;
+            const fallback: ParamSinkFact[] = [];
+            for (const [k, v] of crossFileFacts) {
+              if (k !== key && k.endsWith(suffix)) {
+                const kTypeKey = k.slice(0, k.lastIndexOf("."));
+                if (kTypeKey.startsWith(pkgPrefix)) fallback.push(...v);
+              }
+            }
+            if (fallback.length > 0) list = fallback;
+          }
+        }
+      }
       if (!key || !list) return;
       for (const fact of list) {
         const passed = fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
@@ -3162,6 +3202,22 @@ export function scanAstTaintGo(
         }
       }
     };
+
+    // Cross-file return-value shapes: `pkg.BuildQuery(id)` where BuildQuery's param propagates to its return.
+    // Built lazily only when crossFileShapes is non-empty; crossPackageKey uses the importedPkgs closure.
+    const crossPackageReturnMask: WalkHooksGo["crossPackageMask"] | undefined =
+      crossFileShapes && crossFileShapes.size > 0 ? (fn, args, maskOf, env) => {
+        const key = crossPackageKey(fn);
+        if (!key) return 0;
+        const shapes = crossFileShapes.get(key);
+        if (!shapes) return 0;
+        let m = 0;
+        for (const [i, surviving] of shapes) {
+          if (i === -1) { m |= surviving; continue; }
+          if (args[i]) m |= maskOf(args[i], env) & surviving;
+        }
+        return m;
+      } : undefined;
 
     // Sink checks and same-file call-site seeding for one call_expression, with
     // the env at that point. Statement structure, branching, assignments and
@@ -3526,7 +3582,7 @@ export function scanAstTaintGo(
         for (const id of Object.keys(SEVERITY)) suppressedOut?.push({ id, line });
       }
     };
-    const walker = createWalkerGo({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onDead, sticky });
+    const walker = createWalkerGo({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onDead, sticky, crossPackageMask: crossPackageReturnMask });
 
     const drainSeeded = () => {
       const walkedSignatures = new Set<string>();
@@ -3817,6 +3873,48 @@ export function computeGoFuncSinkFacts(
   } catch (err) {
     console.error(`[astTaintGo] threw computing function sink facts for ${filePath}:`, err);
     recordEngineFailure(filePath, "analysis-failed");
+  }
+  return out;
+}
+
+/**
+ * Cross-file return-value shapes for exported functions: `pkg.Func` -> [(paramIndex, survivingMask)].
+ * Mirrors `computeJavaPassThroughMethods` for Go. Runs `buildPropagatingMapGo` over the parsed file so
+ * it can be called without the full scan pipeline; called from `collectGoPassThroughFunctions` in scanner.ts.
+ */
+export function computeGoPassThroughFunctions(
+  content: string, filePath: string, root: SyntaxNode,
+): Map<string, [number, number][]> {
+  const out = new Map<string, [number, number][]>();
+  try {
+    const pkg = root.namedChildren.find(c => c?.type === "package_clause")?.namedChildren.find(c => c?.type === "package_identifier")?.text;
+    if (!pkg) return out;
+    const localFns = collectLocalFunctionsGo(root);
+    const propagating = buildPropagatingMapGo(localFns, root);
+    for (const decl of root.namedChildren) {
+      if (!decl || (decl.type !== "function_declaration" && decl.type !== "method_declaration")) continue;
+      const name = decl.childForFieldName("name")?.text;
+      if (!name || !/^[A-Z]/.test(name) || pkg === "main") continue;
+      let key: string;
+      let propagatingKey: string;
+      if (decl.type === "method_declaration") {
+        const recvType = decl.childForFieldName("receiver")?.namedChildren[0]?.childForFieldName("type")?.text ?? "";
+        const t = /^\*?([A-Za-z_]\w*)/.exec(recvType)?.[1];
+        if (!t) continue;
+        key = `${pkg}.${t}.${name}`;
+        propagatingKey = `${t}.${name}`;
+      } else {
+        key = `${pkg}.${name}`;
+        propagatingKey = name;
+      }
+      const entry = propagating.get(propagatingKey);
+      if (!entry) continue;
+      const shapes: [number, number][] = [];
+      for (const [idx, mask] of entry) shapes.push([idx, mask]);
+      if (shapes.length > 0) out.set(key, shapes);
+    }
+  } catch (err) {
+    console.error(`[astTaintGo] threw computing passthrough functions for ${filePath}:`, err);
   }
   return out;
 }

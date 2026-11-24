@@ -1,0 +1,27 @@
+{
+  "app":  "govwa",
+  "path": "govwa.go",
+  "cases": {
+    "01": { "category": "sqli",           "cwe": 89,  "negative": false, "label": "SQL injection via fmt.Sprintf in query" },
+    "02": { "category": "sqli",           "cwe": 89,  "negative": false, "label": "SQL injection via string concatenation in UPDATE" },
+    "03": { "category": "cmdi",           "cwe": 78,  "negative": false, "label": "Command injection via exec.Command(sh,-c,...)" },
+    "04": { "category": "ssrf",           "cwe": 918, "negative": false, "label": "SSRF via http.Get with user URL" },
+    "05": { "category": "ssrf",           "cwe": 918, "negative": false, "label": "SSRF to internal service via path concat" },
+    "06": { "category": "path-traversal", "cwe": 22,  "negative": false, "label": "Path traversal via filepath.Join + user name" },
+    "07": { "category": "path-traversal", "cwe": 22,  "negative": false, "label": "Path traversal via os.Open with user path" },
+    "08": { "category": "xss",            "cwe": 79,  "negative": false, "label": "XSS via text/template with unsafe HTML func" },
+    "09": { "category": "auth-weakness",  "cwe": 798, "negative": false, "label": "Hardcoded admin token" },
+    "10": { "category": "auth-weakness",  "cwe": 347, "negative": false, "label": "JWT none algorithm via empty signature" },
+    "11": { "category": "secrets-exposure","cwe": 798,"negative": false, "label": "Hardcoded DB credentials in constants" },
+    "12": { "category": "template-injection","cwe": 94,"negative": false,"label": "SSTI via text/template with user template string" },
+    "13": { "category": "cmdi",           "cwe": 78,  "negative": false, "label": "Command injection via exec.Command(sh,-c,cmd)" },
+    "71": { "category": "sqli",           "cwe": 89,  "negative": true,  "label": "SAFE: positional placeholder in Query" },
+    "72": { "category": "cmdi",           "cwe": 78,  "negative": true,  "label": "SAFE: exec.Command with explicit arg list" },
+    "73": { "category": "ssrf",           "cwe": 918, "negative": true,  "label": "SAFE: URL hostname validated against allowlist" },
+    "74": { "category": "path-traversal", "cwe": 22,  "negative": true,  "label": "SAFE: filepath.Base to strip traversal" },
+    "75": { "category": "xss",            "cwe": 79,  "negative": true,  "label": "SAFE: html/template with auto-escape" },
+    "76": { "category": "secrets-exposure","cwe": 798,"negative": true,  "label": "SAFE: credentials from os.Getenv" },
+    "77": { "category": "auth-weakness",  "cwe": 347, "negative": true,  "label": "SAFE: JWT with explicit HS256 key" },
+    "78": { "category": "template-injection","cwe": 94,"negative": true, "label": "SAFE: static template, no user-controlled string" }
+  }
+}

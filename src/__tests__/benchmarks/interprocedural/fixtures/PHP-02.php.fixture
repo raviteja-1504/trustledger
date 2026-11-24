@@ -1,0 +1,13 @@
+<?php
+// PHP interprocedural case PHP-02: Path traversal via include helper
+// Source: $_GET['page']   Sink: include($path)
+// Steps: load_page($page), $path = "/var/www/pages/" . $page
+function load_page($page) {
+    $path = "/var/www/pages/" . $page;
+    include($path);
+}
+function handle_request() {
+    $page = $_GET['page'];
+    load_page($page);
+}
+handle_request();

@@ -1,0 +1,13 @@
+<?php
+// PHP interprocedural case PHP-03: Command injection via exec wrapper
+// Source: $_POST['host']   Sink: shell_exec($cmd)
+// Steps: make_cmd($host), "ping -c1 " . $host
+function make_cmd($host) {
+    return "ping -c1 " . $host;
+}
+function run_ping() {
+    $host = $_POST['host'];
+    $cmd  = make_cmd($host);
+    echo shell_exec($cmd);
+}
+run_ping();

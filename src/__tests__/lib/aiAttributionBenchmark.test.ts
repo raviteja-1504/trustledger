@@ -18,6 +18,13 @@ describe("AI attribution benchmark", () => {
     }
     expect(report.rocAuc).toBeGreaterThanOrEqual(0);
     expect(report.rocAuc).toBeLessThanOrEqual(1);
+    // task 3: new metrics
+    expect(report.prAuc).toBeGreaterThanOrEqual(0);
+    expect(report.prAuc).toBeLessThanOrEqual(1);
+    expect(report.brierScore).toBeGreaterThanOrEqual(0);
+    expect(report.brierScore).toBeLessThanOrEqual(1);
+    expect(report.ece).toBeGreaterThanOrEqual(0);
+    expect(report.ece).toBeLessThanOrEqual(1);
   });
 });
 

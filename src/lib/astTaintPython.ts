@@ -2392,6 +2392,9 @@ function createWalkerPy(h: WalkHooksPy) {
     return false;
   };
 
+  // Per-scope alias tracking for dict/object aliases: `b = a` → aliases maps "b" → "a"
+  const OBJECT_ALIASES_PY = new WeakMap<Env, Map<string, string>>();
+
   const walkFunction = (fn: SyntaxNode, env: Env) => {
     const body = fn.childForFieldName("body");
     if (!body) return;
@@ -2400,6 +2403,7 @@ function createWalkerPy(h: WalkHooksPy) {
     // FastAPI route handler, whose parameters ARE the request input.
     const django = hasRequestParam(fn);
     const fenv = cloneEnv(env);
+    if (h.descendFunctions) OBJECT_ALIASES_PY.set(fenv, new Map());
     const seeded = isFastApiHandler(fn);
     const webargs = new Set(webargsParams(fn));
     const fastapi = seeded ? fastApiTaintedParams(fn) : null;
@@ -2611,6 +2615,11 @@ function createWalkerPy(h: WalkHooksPy) {
         if (left.type === "identifier") {
           markAssignedPy(env, left.text, provenLiteralPy(right, env));
           env.set(left.text, mask);
+          // Record object alias: `b = a` (identifier = identifier, untainted)
+          const aliases = OBJECT_ALIASES_PY.get(env);
+          if (aliases && mask === 0 && right.type === "identifier" && right.text !== left.text) {
+            aliases.set(left.text, right.text);
+          }
         } else if (left.type === "pattern_list" || left.type === "tuple_pattern") {
           for (const id of bindingIdentifiersPy(left)) markAssignedPy(env, id, false);
           if (mask & ALL) for (const el of left.namedChildren) if (el?.type === "identifier") env.set(el.text, mask);
@@ -2626,6 +2635,15 @@ function createWalkerPy(h: WalkHooksPy) {
             // `d["k"] = v` with a literal key: remembered per key, so d["other"] is not v (see keyedReadPy)
             markAssignedPy(env, `${target.text}[${key}]`, provenLiteralPy(right, env));
             env.set(`${target.text}[${key}]`, mask);
+            // Mirror to alias root: if b is an alias of a, also write a[k]
+            if (mask) {
+              const aliases = OBJECT_ALIASES_PY.get(env);
+              const aliasRoot = aliases?.get(target.text);
+              if (aliasRoot) {
+                markAssignedPy(env, `${aliasRoot}[${key}]`, provenLiteralPy(right, env));
+                env.set(`${aliasRoot}[${key}]`, (env.get(`${aliasRoot}[${key}]`) ?? 0) | mask);
+              }
+            }
           } else {
             const root = rootIdentifierPy(left);
             if (root) env.set(root.text, (env.get(root.text) ?? 0) | mask);

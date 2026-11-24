@@ -63,6 +63,9 @@ describe("what sits beside a credential name but is not one", () => {
     ["User.objects.filter(password__startswith='sha1$$')", "a Django lookup"],
     ["secret: \"<paste secret>\"", "a template"],
     ["token = 'changeme'", "a placeholder"],
+    ["secretMode === \"unconfigured\"", "a comparison, not an assignment"],
+    ["if (config.secret === \"uninitialized\") { throw new Error(); }", "an equality check"],
+    ["return this.authToken !== \"none\" && this.authToken !== \"expired\";", "an inequality check"],
   ])("%s (%s)", (line) => { expect(hit(line)).toBeNull(); });
 
   it("the same line is not judged in a test file (generic rules read production code)", () => {

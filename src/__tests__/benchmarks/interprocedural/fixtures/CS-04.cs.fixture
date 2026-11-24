@@ -1,0 +1,23 @@
+// C# interprocedural case CS-04: Command injection via Process helper
+// Source: req.Query["arg"]  Sink: proc.Start()
+// Steps: runner.Run(arg), Arguments = "/c echo " + arg
+using Microsoft.AspNetCore.Http;
+using System.Diagnostics;
+class ProcessRunner {
+    public string Run(string arg) {
+        var proc = new Process();
+        proc.StartInfo.FileName  = "cmd.exe";
+        proc.StartInfo.Arguments = "/c echo " + arg;
+        proc.StartInfo.UseShellExecute = false;
+        proc.StartInfo.RedirectStandardOutput = true;
+        proc.Start();
+        return proc.StandardOutput.ReadToEnd();
+    }
+}
+class CommandController {
+    ProcessRunner runner = new();
+    public string Get(HttpRequest req) {
+        var arg = req.Query["arg"].ToString();
+        return runner.Run(arg);
+    }
+}

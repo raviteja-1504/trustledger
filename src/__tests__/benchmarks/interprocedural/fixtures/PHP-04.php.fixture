@@ -1,0 +1,13 @@
+<?php
+// PHP interprocedural case PHP-04: XSS via output helper
+// Source: $_GET['name']   Sink: echo $html
+// Steps: render_greeting($name), "<h1>Hello $name</h1>"
+function render_greeting($name) {
+    return "<h1>Hello $name</h1>";
+}
+function show_greeting() {
+    $name = $_GET['name'];
+    $html = render_greeting($name);
+    echo $html;
+}
+show_greeting();

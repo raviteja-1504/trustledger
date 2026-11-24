@@ -1,0 +1,14 @@
+<?php
+// PHP interprocedural case PHP-01: SQL injection via helper function
+// Source: $_GET['id']   Sink: $db->query($query)
+// Steps: build_query($id), "SELECT * FROM users WHERE id = '$id'"
+function build_query($id) {
+    return "SELECT * FROM users WHERE id = '$id'";
+}
+function get_user() {
+    $db = new mysqli("localhost", "root", "", "app");
+    $id = $_GET['id'];
+    $query = build_query($id);
+    return $db->query($query);
+}
+get_user();

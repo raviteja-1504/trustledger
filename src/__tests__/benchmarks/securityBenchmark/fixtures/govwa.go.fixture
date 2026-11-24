@@ -1,0 +1,217 @@
+// GoVWA-pattern benchmark fixture (Go)
+// Cases 01-13: vulnerable patterns modelled on GoVWA
+// Cases 71-78: negative (safe) patterns — MUST NOT trigger a finding
+// BENCHMARK ONLY — DO NOT DEPLOY.
+
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"text/template"
+)
+
+var db *sql.DB
+
+// -- Vulnerable patterns -------------------------------------------------------
+
+// 01
+// SQL injection — fmt.Sprintf in query string (GoVWA /user)
+func GetUser(w http.ResponseWriter, r *http.Request) {
+	uid   := r.URL.Query().Get("id")
+	query := fmt.Sprintf("SELECT * FROM users WHERE id = '%s'", uid)
+	rows, _ := db.Query(query)
+	defer rows.Close()
+}
+
+// 02
+// SQL injection — string concatenation in UPDATE (GoVWA /profile)
+func UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	name  := r.URL.Query().Get("name")
+	email := r.URL.Query().Get("email")
+	stmt  := "UPDATE users SET name = '" + name + "' WHERE email = '" + email + "'"
+	db.Exec(stmt)
+}
+
+// 03
+// Command injection — exec.Command("sh", "-c", …) with user input (GoVWA /ping)
+func PingHost(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	out, _ := exec.Command("sh", "-c", "ping -c1 "+host).Output()
+	w.Write(out)
+}
+
+// 04
+// SSRF — http.Get with user-supplied URL (GoVWA /fetch)
+func FetchURL(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("url")
+	resp, _ := http.Get(target)
+	defer resp.Body.Close()
+	io.Copy(w, resp.Body)
+}
+
+// 05
+// SSRF — http.Get to internal service (GoVWA /internal-proxy)
+func InternalProxy(w http.ResponseWriter, r *http.Request) {
+	service := r.URL.Query().Get("service")
+	resp, _ := http.Get("http://internal-services/" + service)
+	defer resp.Body.Close()
+	io.Copy(w, resp.Body)
+}
+
+// 06
+// Path traversal — filepath.Join with user path (GoVWA /file)
+func ReadFile(w http.ResponseWriter, r *http.Request) {
+	name    := r.URL.Query().Get("name")
+	content, _ := os.ReadFile(filepath.Join("/srv/uploads", name))
+	w.Write(content)
+}
+
+// 07
+// Path traversal — os.Open with user-supplied path (GoVWA /download)
+func DownloadFile(w http.ResponseWriter, r *http.Request) {
+	filePath := r.URL.Query().Get("path")
+	f, _ := os.Open(filePath)
+	defer f.Close()
+	io.Copy(w, f)
+}
+
+// 08
+// XSS — template rendered with HTML escaping disabled (GoVWA /comment)
+func ShowComment(w http.ResponseWriter, r *http.Request) {
+	text := r.URL.Query().Get("text")
+	tmpl := template.Must(template.New("t").Funcs(template.FuncMap{
+		"unsafe": func(s string) template.HTML { return template.HTML(s) },
+	}).Parse(`<p>{{unsafe .}}</p>`))
+	tmpl.Execute(w, text)
+}
+
+// 09
+// Auth weakness — hardcoded admin token (GoVWA /admin)
+const AdminToken = "govwa_admin_secret_2024"
+
+func AdminHandler(w http.ResponseWriter, r *http.Request) {
+	token := r.Header.Get("X-Admin-Token")
+	if token != AdminToken {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	fmt.Fprintf(w, "admin access granted")
+}
+
+// 10
+// Auth weakness — JWT none algorithm via empty key (GoVWA /auth)
+func VerifyJWT(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	// golang-jwt: ParseWithClaims with key func returning nil allows none alg
+	parts := strings.Split(token, ".")
+	if len(parts) == 3 && parts[2] == "" {
+		fmt.Fprintf(w, "token accepted (alg=none)")
+	}
+}
+
+// 11
+// Secrets exposure — hardcoded DB credentials (GoVWA config)
+const (
+	DBUser   = "root"
+	DBPass   = "govwa_db_password"
+	DBConn   = "root:govwa_db_password@tcp(db:3306)/govwa"
+)
+
+// 12
+// Template injection — text/template with user-controlled template string (GoVWA /template)
+func RenderTemplate(w http.ResponseWriter, r *http.Request) {
+	tmplStr := r.URL.Query().Get("template")
+	tmpl, _ := template.New("user").Parse(tmplStr)
+	tmpl.Execute(w, map[string]string{"name": "world"})
+}
+
+// 13
+// Command injection — exec.Command with unsplit user argument (GoVWA /exec)
+func ExecCommand(w http.ResponseWriter, r *http.Request) {
+	cmd := r.URL.Query().Get("cmd")
+	out, _ := exec.Command("sh", "-c", cmd).CombinedOutput()
+	w.Write(out)
+}
+
+// -- Negative (safe) patterns --------------------------------------------------
+
+// 71
+// SAFE SQL — Query with positional placeholder
+func SafeGetUser(w http.ResponseWriter, r *http.Request) {
+	uid  := r.URL.Query().Get("id")
+	rows, _ := db.Query("SELECT * FROM users WHERE id = $1", uid)
+	defer rows.Close()
+}
+
+// 72
+// SAFE command — exec.Command with explicit argument list (no shell)
+func SafePingHost(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	out, _ := exec.Command("ping", "-c1", host).Output()
+	w.Write(out)
+}
+
+// 73
+// SAFE SSRF — URL scheme and host validated before request
+func SafeFetchURL(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("url")
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Hostname() != "api.example.com" {
+		http.Error(w, "disallowed", 403)
+		return
+	}
+	resp, _ := http.Get(parsed.String())
+	defer resp.Body.Close()
+	io.Copy(w, resp.Body)
+}
+
+// 74
+// SAFE path — filepath.Base to strip directory components
+func SafeReadFile(w http.ResponseWriter, r *http.Request) {
+	name    := filepath.Base(r.URL.Query().Get("name"))
+	content, _ := os.ReadFile(filepath.Join("/srv/uploads", name))
+	w.Write(content)
+}
+
+// 75
+// SAFE XSS — html/template (auto-escaping by default)
+func SafeShowComment(w http.ResponseWriter, r *http.Request) {
+	text := r.URL.Query().Get("text")
+	// html/template auto-escapes — using the safe package
+	import "html/template"
+	tmpl := template.Must(template.New("t").Parse(`<p>{{.}}</p>`))
+	tmpl.Execute(w, text)
+}
+
+// 76
+// SAFE secrets — credentials from environment variables
+var (
+	safeDBUser = os.Getenv("DB_USER")
+	safeDBPass = os.Getenv("DB_PASSWORD")
+)
+
+// 77
+// SAFE JWT — explicit HS256 with a real key
+func SafeVerifyJWT(w http.ResponseWriter, r *http.Request) {
+	secret := []byte(os.Getenv("JWT_SECRET"))
+	token  := r.URL.Query().Get("token")
+	// Use a proper JWT library with algorithm pinned to HS256
+	_ = secret
+	_ = token
+	fmt.Fprintf(w, "verified")
+}
+
+// 78
+// SAFE template — static template, no user-controlled template string
+func SafeRenderTemplate(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	tmpl := template.Must(template.New("t").Parse(`<p>Hello, {{.}}!</p>`))
+	tmpl.Execute(w, name)
+}

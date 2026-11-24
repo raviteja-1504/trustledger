@@ -33,6 +33,9 @@ export interface BenchmarkReport {
   f1:         number;
   accuracy:   number;
   rocAuc:     number;
+  prAuc:      number;  // area under precision-recall curve (better for imbalanced sets)
+  brierScore: number;  // mean squared error of probability estimates (lower = better)
+  ece:        number;  // expected calibration error (lower = better)
 }
 
 /**
@@ -55,8 +58,7 @@ function computeRocAuc(scores: Array<{ score: number; label: BenchmarkLabel }>):
   const negatives = scores.filter(s => s.label === "human");
   if (positives.length === 0 || negatives.length === 0) return 0.5;
 
-  let wins = 0;
-  let ties = 0;
+  let wins = 0, ties = 0;
   for (const p of positives) {
     for (const n of negatives) {
       if (p.score > n.score) wins++;
@@ -64,6 +66,74 @@ function computeRocAuc(scores: Array<{ score: number; label: BenchmarkLabel }>):
     }
   }
   return (wins + 0.5 * ties) / (positives.length * negatives.length);
+}
+
+/**
+ * Computes PR-AUC via trapezoidal integration over the precision-recall curve.
+ * Thresholds are derived from the unique score values in descending order.
+ */
+function computePrAuc(scores: Array<{ score: number; label: BenchmarkLabel }>): number {
+  const nPos = scores.filter(s => s.label === "ai").length;
+  if (nPos === 0) return 0;
+
+  // Sort thresholds descending (from highest score to lowest)
+  const thresholds = [...new Set(scores.map(s => s.score))].sort((a, b) => b - a);
+  const points: Array<{ p: number; r: number }> = [];
+
+  for (const t of thresholds) {
+    const tp = scores.filter(s => s.label === "ai" && s.score >= t).length;
+    const fp = scores.filter(s => s.label === "human" && s.score >= t).length;
+    const p = tp + fp > 0 ? tp / (tp + fp) : 1;
+    const r = tp / nPos;
+    points.push({ p, r });
+  }
+  // Add (recall=0, precision=1) baseline
+  points.unshift({ p: 1, r: 0 });
+
+  // Trapezoidal integration
+  let auc = 0;
+  for (let i = 1; i < points.length; i++) {
+    const dr = points[i].r - points[i - 1].r;
+    const avgP = (points[i].p + points[i - 1].p) / 2;
+    auc += dr * avgP;
+  }
+  return Math.max(0, auc);
+}
+
+/** Brier score: mean squared error of probability estimates (treating "ai" = 1, "human" = 0). */
+function computeBrierScore(scores: Array<{ score: number; label: BenchmarkLabel }>): number {
+  if (scores.length === 0) return 1;
+  const sum = scores.reduce((acc, s) => {
+    const y = s.label === "ai" ? 1 : 0;
+    return acc + (s.score - y) ** 2;
+  }, 0);
+  return sum / scores.length;
+}
+
+/**
+ * Expected Calibration Error: bins predictions into 10 equal-width buckets,
+ * computes |avg_confidence - fraction_positive| per bucket, weighted by count.
+ */
+function computeEce(scores: Array<{ score: number; label: BenchmarkLabel }>, nBins = 10): number {
+  if (scores.length === 0) return 0;
+  const bins: Array<{ sumConf: number; nPos: number; count: number }> =
+    Array.from({ length: nBins }, () => ({ sumConf: 0, nPos: 0, count: 0 }));
+
+  for (const s of scores) {
+    const b = Math.min(nBins - 1, Math.floor(s.score * nBins));
+    bins[b].sumConf += s.score;
+    bins[b].nPos    += s.label === "ai" ? 1 : 0;
+    bins[b].count   += 1;
+  }
+
+  let ece = 0;
+  for (const bin of bins) {
+    if (bin.count === 0) continue;
+    const avgConf = bin.sumConf / bin.count;
+    const fracPos = bin.nPos / bin.count;
+    ece += (bin.count / scores.length) * Math.abs(avgConf - fracPos);
+  }
+  return ece;
 }
 
 /**
@@ -95,20 +165,27 @@ export function runAIAttributionBenchmark(
   const recall    = tp + fn > 0 ? tp / (tp + fn) : 0;
   const f1        = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
   const accuracy  = results.length > 0 ? (tp + tn) / results.length : 0;
-  const rocAuc    = computeRocAuc(scored.map(s => ({ score: s.ai_percentage, label: s.label })));
+  const scorePairs = scored.map(s => ({ score: s.ai_percentage, label: s.label }));
+  const rocAuc    = computeRocAuc(scorePairs);
+  const prAuc     = computePrAuc(scorePairs);
+  const brierScore = computeBrierScore(scorePairs);
+  const ece       = computeEce(scorePairs);
 
-  return { threshold, results, confusion: { tp, fp, tn, fn }, precision, recall, f1, accuracy, rocAuc };
+  return { threshold, results, confusion: { tp, fp, tn, fn }, precision, recall, f1, accuracy, rocAuc, prAuc, brierScore, ece };
 }
 
 /** Formats a BenchmarkReport as a human-readable string (for logs/CLI). */
 export function formatBenchmarkReport(report: BenchmarkReport): string {
   const lines: string[] = [
     `AI Attribution Benchmark (n=${report.results.length}, threshold=${report.threshold})`,
-    `  Precision: ${(report.precision * 100).toFixed(1)}%`,
-    `  Recall:    ${(report.recall * 100).toFixed(1)}%`,
-    `  F1:        ${(report.f1 * 100).toFixed(1)}%`,
-    `  Accuracy:  ${(report.accuracy * 100).toFixed(1)}%`,
-    `  ROC-AUC:   ${report.rocAuc.toFixed(3)}`,
+    `  Precision:   ${(report.precision * 100).toFixed(1)}%`,
+    `  Recall:      ${(report.recall * 100).toFixed(1)}%`,
+    `  F1:          ${(report.f1 * 100).toFixed(1)}%`,
+    `  Accuracy:    ${(report.accuracy * 100).toFixed(1)}%`,
+    `  ROC-AUC:     ${report.rocAuc.toFixed(3)}`,
+    `  PR-AUC:      ${report.prAuc.toFixed(3)}`,
+    `  Brier score: ${report.brierScore.toFixed(3)} (lower = better)`,
+    `  ECE:         ${report.ece.toFixed(3)} (lower = better)`,
     `  Confusion: TP=${report.confusion.tp} FP=${report.confusion.fp} TN=${report.confusion.tn} FN=${report.confusion.fn}`,
     `  Per-sample:`,
   ];

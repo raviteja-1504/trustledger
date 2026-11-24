@@ -1,0 +1,29 @@
+{
+  "app":  "juiceshop",
+  "path": "juiceshop.ts",
+  "cases": {
+    "01": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via id interpolation" },
+    "02": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via string concatenation (login)" },
+    "03": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "Reflected XSS in search results" },
+    "04": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "Stored XSS in product description" },
+    "05": { "category": "cmdi",                    "cwe": 78,  "negative": false, "label": "Command injection via image processing" },
+    "06": { "category": "ssrf",                    "cwe": 918, "negative": false, "label": "SSRF via coupon validation URL" },
+    "07": { "category": "path-traversal",          "cwe": 22,  "negative": false, "label": "Path traversal in file download" },
+    "08": { "category": "prototype-pollution",     "cwe": 1321,"negative": false, "label": "Prototype pollution via deepMerge" },
+    "09": { "category": "redos",                   "cwe": 400, "negative": false, "label": "ReDoS in email validation regex" },
+    "10": { "category": "auth-weakness",           "cwe": 347, "negative": false, "label": "JWT none algorithm accepted" },
+    "11": { "category": "auth-weakness",           "cwe": 798, "negative": false, "label": "Hardcoded admin password" },
+    "12": { "category": "secrets-exposure",        "cwe": 798, "negative": false, "label": "Hardcoded Stripe secret key" },
+    "13": { "category": "xss",                     "cwe": 601, "negative": false, "label": "Open redirect" },
+    "14": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "Stored XSS in user profile bio" },
+    "15": { "category": "path-traversal",          "cwe": 22,  "negative": false, "label": "Path traversal via double decode" },
+    "71": { "category": "sqli",                    "cwe": 89,  "negative": true,  "label": "SAFE: parameterised query" },
+    "72": { "category": "xss",                     "cwe": 79,  "negative": true,  "label": "SAFE: HTML-escaped output" },
+    "73": { "category": "cmdi",                    "cwe": 78,  "negative": true,  "label": "SAFE: execFile with argument array" },
+    "74": { "category": "ssrf",                    "cwe": 918, "negative": true,  "label": "SAFE: URL allowlisted before fetch" },
+    "75": { "category": "path-traversal",          "cwe": 22,  "negative": true,  "label": "SAFE: basename stripping" },
+    "76": { "category": "auth-weakness",           "cwe": 347, "negative": true,  "label": "SAFE: explicit HS256, no none" },
+    "77": { "category": "secrets-exposure",        "cwe": 798, "negative": true,  "label": "SAFE: API key from env var" },
+    "78": { "category": "xss",                     "cwe": 601, "negative": true,  "label": "SAFE: redirect allow-list" }
+  }
+}

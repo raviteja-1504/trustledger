@@ -47,6 +47,12 @@ describe("PHP weak cipher use", () => {
     // Legacy compat: same code without the comment is still flagged
     const noComment = `    $iv = random_bytes(16);\n    $enc = openssl_encrypt($data, 'aes-256-cbc', $key, 0, $iv);`;
     expect(weak(fn(noComment))).toBe(true);
+    // TLS cipher-suite / PCI compliance mandate: also suppressed
+    const tlsComment = `    $iv = random_bytes(16);\n    // TLS cipher suite requires AES-CBC for PCI compliance\n    $enc = openssl_encrypt($data, 'aes-256-cbc', $key, 0, $iv);`;
+    expect(weak(fn(tlsComment))).toBe(false);
+    // Comment 5 lines before: should still be caught by the extended window
+    const farComment = `    $iv = random_bytes(16);\n    // protocol spec mandates CBC here\n    $a = 1;\n    $b = 2;\n    $c = 3;\n    $enc = openssl_encrypt($data, 'aes-256-cbc', $key, 0, $iv);`;
+    expect(weak(fn(farComment))).toBe(false);
   });
   it("a fixed, empty or zero IV, inline or assigned first", () => {
     const withMac = "\n    $mac = hash_hmac('sha256', $enc, $macKey);";

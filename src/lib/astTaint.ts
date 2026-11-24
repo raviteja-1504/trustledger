@@ -189,6 +189,10 @@ const SOURCE_ROOTS = new Set(["req", "request", "_req", "_request"]);
 // `url` / `nextUrl` / `searchParams`: the Fetch-API / Next.js route-handler request (`req.url`, `req.nextUrl.searchParams.get("q")`).
 // `payload`: the Hapi request body (`request.payload`)
 const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies", "url", "originalUrl", "nextUrl", "searchParams", "payload"]);
+// A sub-set of SOURCE_PROPS used to seed a request-object parameter when computing source-field shapes (see
+// computeSourceFieldShapes): "url"/"originalUrl"/"nextUrl" are intentionally excluded so that bare `r.url` does not
+// propagate — only structured containers (query/body/params/headers/cookies) are seeded.
+const SOURCE_FIELD_SEED_PROPS = ["query", "body", "params", "headers", "cookies"] as const;
 // Koa: the context holds the request (`ctx.query`, `ctx.params`, `ctx.request.body`, `ctx.req.headers`); `ctx.body` is the RESPONSE, so it is not here
 const CTX_ROOTS = new Set(["ctx", "_ctx"]);
 const ANGULAR_ROUTE_PROPS = new Set(["queryParams", "params", "queryParamMap", "paramMap", "fragment"]);
@@ -1440,7 +1444,7 @@ const HTTP_RESPONSE_CALL_RE =/^(?:axios(?:\.(?:get|post|put|patch|delete|request
 /** React state: `const [x, setX] = useState(...)` -- the sticky key a setter call writes and a read of x consults. */
 const STATE_KEY = (name: string) => `state:${name}`;
 
-function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>, storedProvenance?: StoredProvenanceIO, clientSide = false) {
+function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>, storedProvenance?: StoredProvenanceIO, clientSide = false, sourceFieldPropagating?: Map<string, Map<number, number>>) {
   let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
     if (ts.isParenthesizedExpression(expr)) return taintMask(expr.expression, env);
@@ -1633,6 +1637,21 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
         }
         if (m) return m;
       }
+      // Source-field propagation: fires when a bare SOURCE_ROOT identifier (req/request/…) is passed to
+      // a helper that accesses its SOURCE_PROPS sub-fields (query/body/params/headers/cookies).
+      // `taintMask(req, env)` is 0 because source taint on req.query.d is lazy (via isTaintSourceExpr),
+      // never stored in the env, so the standard shape loop above misses it. This path catches it.
+      if (sourceFieldPropagating) {
+        const sfShapes = sourceFieldPropagating.get(fnName);
+        if (sfShapes) {
+          let m = 0;
+          for (const [paramIdx, sfMask] of sfShapes) {
+            const a = expr.arguments[paramIdx];
+            if (a && ts.isIdentifier(a) && SOURCE_ROOTS.has(a.text)) m |= sfMask;
+          }
+          if (m) return m;
+        }
+      }
     }
     // Calling a value: an IIFE / `f()()` / a closure held in a variable returns what it captured.
     const inner = unwrapExpr(callee);
@@ -1701,6 +1720,13 @@ function paramShapesOf(fn: LocalFn): ParamShape[] {
 }
 
 /**
+ * Per-scope object alias map keyed by the scope's env instance: `aliases.get(env)?.get("b") = "a"` means
+ * `const b = a` was seen in this scope, so writes to `b.field` also apply to `a.field`.
+ * Only populated by the main-scan walker (walkFunction) -- the propagation-summary builders don't track it.
+ */
+const OBJECT_ALIASES = new WeakMap<Env, Map<string, string>>();
+
+/**
  * Mutates `env` for the taint effect of ONE statement node's own local
  * variable declarations / simple reassignments (`x = expr`) -- does not do
  * sink checks, does not recurse into children (callers own that). Shared by
@@ -1715,12 +1741,19 @@ function paramShapesOf(fn: LocalFn): ParamShape[] {
  * of the pre-fix code, not a hypothetical.
  */
 function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void {
+  const aliases = OBJECT_ALIASES.get(env);
   if (ts.isVariableStatement(node)) {
     for (const decl of node.declarationList.declarations) {
       if (!decl.initializer) continue;
       const mask = maskFn(decl.initializer, env);
       if (ts.isIdentifier(decl.name)) {
         env.set(decl.name.text, mask);
+        // Object alias: `const b = a` where `a` is a bare (untainted) identifier — b and a share the same object.
+        // Track so that `b.field = x` also writes `a.field = x`.
+        if (aliases && mask === 0 && ts.isIdentifier(decl.initializer) && !maskFn(decl.initializer, env)) {
+          const target = decl.initializer.text;
+          if (target !== decl.name.text) aliases.set(decl.name.text, target);
+        }
       } else if ((ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) && isTaintedMask(mask)) {
         for (const leaf of bindingLeafNames(decl.name)) env.set(leaf, mask);
       }
@@ -1742,11 +1775,28 @@ function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void 
       // is left untouched, so a consumer that only ever checked obj before
       // this change sees exactly what it saw before.
       const path = calleeText(left);
-      if (path) env.set(path, maskFn(right, env) | (compound ? (env.get(path) ?? 0) : 0));
+      if (path) {
+        const m = maskFn(right, env) | (compound ? (env.get(path) ?? 0) : 0);
+        env.set(path, m);
+        // Mirror to alias root: `b.field = x` where `const b = a` → also `a.field = x`.
+        if (aliases && m) {
+          const root = path.slice(0, path.indexOf("."));
+          const aliasRoot = aliases.get(root);
+          if (aliasRoot) env.set(aliasRoot + path.slice(root.length), (env.get(aliasRoot + path.slice(root.length)) ?? 0) | m);
+        }
+      }
     } else if (ts.isElementAccessExpression(left)) {
       // `target[key] = value` -- the container now holds the value (additive: a write never de-taints)
       const root = rootIdentifier(left.expression);
-      if (root) env.set(root.text, (env.get(root.text) ?? 0) | maskFn(right, env));
+      if (root) {
+        const m = (env.get(root.text) ?? 0) | maskFn(right, env);
+        env.set(root.text, m);
+        // Mirror to alias root: `b["key"] = x` where `const b = a` → also `a` holds the taint.
+        if (aliases && m) {
+          const aliasRoot = aliases.get(root.text);
+          if (aliasRoot) env.set(aliasRoot, (env.get(aliasRoot) ?? 0) | m);
+        }
+      }
     }
   } else if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
              ts.isPropertyAccessExpression(node.expression.expression) &&
@@ -2023,6 +2073,7 @@ function createWalker(h: WalkerHooks) {
     // A closure sees captured outer variables (cloned env), but its own
     // parameters shadow same-named outer ones and start untainted.
     const fenv = cloneEnv(env);
+    if (h.descendFunctions) OBJECT_ALIASES.set(fenv, new Map());
     const parent = f.parent;
     const seeds = h.callbackParamMasks && parent && ts.isCallExpression(parent)
       ? h.callbackParamMasks(parent, parent.arguments.indexOf(f as ts.Expression), env) : undefined;
@@ -2247,6 +2298,29 @@ function returnMask(fn: LocalFn, maskFn: TaintMaskFn, seed: Env): number {
     onReturn: (expr, env) => { m |= maskFn(expr, env); },
   }).walkNode(fn.body, seed);
   return m;
+}
+
+/**
+ * For each local function, compute which params access SOURCE_PROPS sub-fields (query/body/params/headers/cookies)
+ * and what taint class bits survive to the return value under that seed. These "source-field shapes" fire at a
+ * call site ONLY when the argument is a bare SOURCE_ROOT identifier (req/request/etc.), whose sub-fields are
+ * lazily-evaluated sources never stored in the env. This catches `get(req)` where `get(r) { return r.query.d; }`
+ * without affecting precision for `get(req.user.id)` or non-SOURCE_ROOT arguments.
+ */
+function computeSourceFieldShapes(localFns: Map<string, LocalFn>, maskFn: TaintMaskFn): Map<string, Map<number, number>> {
+  const out = new Map<string, Map<number, number>>();
+  for (const [name, fn] of localFns) {
+    const fnShapes = new Map<number, number>();
+    for (const shape of paramShapesOf(fn)) {
+      if (shape.isRest) continue;
+      const seed: Env = new Map();
+      for (const prop of SOURCE_FIELD_SEED_PROPS) seed.set(`${shape.name}.${prop}`, ALL);
+      const surviving = returnMask(fn, maskFn, seed) & ALL;
+      if (surviving) fnShapes.set(shape.index, surviving);
+    }
+    if (fnShapes.size > 0) out.set(name, fnShapes);
+  }
+  return out;
 }
 
 // Caps every bounded fixed-point loop below (same-file propagating-map
@@ -3491,7 +3565,8 @@ export function scanAstTaint(
     // browser code: JSX, or a front-end framework imported (see HTTP_RESPONSE_CALL_RE)
     const clientSide = /\.[jt]sx$/.test(filePath) || /from\s+['"](?:react|react-dom|vue|@angular\/core|svelte|preact)['"]|require\(\s*['"]react['"]\s*\)/.test(content)
       || (() => { let jsx = false; const v = (n: ts.Node) => { if (jsx) return; if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) { jsx = true; return; } ts.forEachChild(n, v); }; v(sourceFile); return jsx; })();
-    const taintMask = makeTaintMask(propagating, sticky, storedProvenance, clientSide);
+    const sourceFieldPropagating = computeSourceFieldShapes(localFns, makeTaintMask(propagating));
+    const taintMask = makeTaintMask(propagating, sticky, storedProvenance, clientSide, sourceFieldPropagating);
     // React: setter name -> state variable (`const [desc, setDesc] = useState('')`)
     const stateSetters = new Map<string, string>();
     {
@@ -4045,10 +4120,56 @@ export function scanAstTaint(
       if (!name || !info) return;
       for (const fact of info.sinks) {
         if (fact.id === "type-confusion" && clientSide) continue;
+        if (fact.id === "ssrf" && clientSide) continue;
         for (const a of argsForFact(call.arguments, fact)) {
           if (isFunctionExpr(a)) continue;
           const m = taintMask(a, env);
           if (m & fact.sinkClass) { emitCrossFileSink(call, a, name, info.fromModule, fact); break; }
+          if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(call) });
+        }
+      }
+    };
+
+    // ── Same-file call-site analysis (context-sensitive per call site) ──
+    // Reports at the CALL SITE with the actual tainted argument visible — matching the cross-file behavior
+    // and providing precise attribution per call site. The seededParams body walk still runs and reports
+    // the sink location inside the callee, so both viewpoints are available to the user.
+    const localIncomingSinks = new Map<string, readonly ParamSinkFact[]>();
+    if (crossFilePropagating) {
+      for (const [name, info] of crossFilePropagating) {
+        if (info.sinks && info.sinks.length > 0) localIncomingSinks.set(name, info.sinks);
+      }
+    }
+    const localSinkResolver = makeSinkCalleeResolver(localFns, namespaceLocals);
+    const localSinkFacts = buildSinkFactsMap(
+      localFns, makeTaintMask(propagating), importMap, filePath, localIncomingSinks, localSinkResolver,
+    );
+    const emitSameFileSink = (call: ts.CallExpression, arg: ts.Expression, name: string, fact: ParamSinkFact) => {
+      const line = lineOf(call);
+      const key = `${fact.id}:${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const sinkLabel = `${name}() -> ${fact.sinkExpr}`;
+      const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      const trace = crossFileTrace(buildTrace(call, arg, sinkLabel), name, fact);
+      findings.push({
+        id: fact.id as AstTaintId, line, sinkExpr: sinkLabel, sourceExpr: sourceLabel(arg),
+        detail: `Tainted expression '${sourceLabel(arg)}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line}${via} — same-file data-flow match`,
+        trace,
+      });
+    };
+    const checkSameFileSinks = (call: ts.CallExpression, env: Env) => {
+      if (localSinkFacts.size === 0) return;
+      const name = resolveKnownCallee(call.expression, localSinkFacts, localSinkResolver);
+      const facts = name ? localSinkFacts.get(name) : undefined;
+      if (!name || !facts) return;
+      for (const fact of facts) {
+        if (fact.id === "type-confusion" && clientSide) continue;
+        if (fact.id === "ssrf" && clientSide) continue;
+        for (const a of argsForFact(call.arguments, fact)) {
+          if (isFunctionExpr(a)) continue;
+          const m = taintMask(a, env);
+          if (m & fact.sinkClass) { emitSameFileSink(call, a, name, fact); break; }
           if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(call) });
         }
       }
@@ -4093,6 +4214,9 @@ export function scanAstTaint(
       // browser values (location, referrer, a fetched body) are strings or parsed JSON the page chose -- not the
       // query/body parser's arrays
       if (match.id === "type-confusion" && clientSide) return;
+      // SSRF is a server-side weakness (exploiting server credentials to reach internal services); a browser
+      // component that fetches a user-controlled URL is a reflected-XSS / open-redirect risk, not SSRF.
+      if (match.id === "ssrf" && clientSide) return;
       const cls = classOf(match.id);
       let positionCleared: ts.Expression | undefined;
       let cleared = false;
@@ -4419,6 +4543,7 @@ export function scanAstTaint(
         checkCallForSink(n, env);
         checkArgumentInjection(n, env);
         checkCrossFileSinks(n, env);
+        checkSameFileSinks(n, env);
         checkVmSandboxEval(n, env);
         // Same-file call binding: seed callee params for tainted args, one hop.
         // Matched by INDEX (via paramShapesOf, including rest-param

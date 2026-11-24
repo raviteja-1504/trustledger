@@ -40,6 +40,7 @@ import { loadPolicy, loadTriage as loadShadowTriage, notifyUnapprovedTools } fro
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
+import { expandWithDependents } from "@/lib/dependencyInvalidation";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { blockingRisks, countOpenBlocking, loadGate } from "@/lib/mergeGate";
 import { ensurePolicyAlerts } from "@/lib/policyAlerts";
@@ -270,8 +271,12 @@ async function handle(req: NextRequest) {
 
     let changedPaths = new Set<string>();
     if (isDelta && prevScan && beforeSha) {
-      changedPaths = await getCommitDiff(token, owner, repoName, beforeSha, headSha);
-      if (changedPaths.size === 0) prevScan = null;
+      const rawChanged = await getCommitDiff(token, owner, repoName, beforeSha, headSha);
+      if (rawChanged.size === 0) {
+        prevScan = null;
+      } else {
+        changedPaths = rawChanged;
+      }
     }
 
     const prFiles = await getPRFiles(token, owner, repoName, prNumber);
@@ -284,12 +289,45 @@ async function handle(req: NextRequest) {
       : allScannablePaths;
 
     const fetchStarted = Date.now();
-    const fileContents = pathsToFetch.length > 0
+    let fileContents = pathsToFetch.length > 0
       ? await fetchFileContents(token, owner, repoName, headSha, pathsToFetch)
       : [];
     void recordEvent({ kind: "scan.files_fetched", duration_ms: Date.now() - fetchStarted, data: { pr_files: prFiles.length, scannable: allScannablePaths.length, requested: pathsToFetch.length, fetched: fileContents.length, delta: isDelta } });
-    const fetchedPaths = new Set(fileContents.map(f => f.path));
-    const unreadPaths = pathsToFetch.filter(p => !fetchedPaths.has(p));
+    let fetchedPaths = new Set(fileContents.map(f => f.path));
+    let unreadPaths = pathsToFetch.filter(p => !fetchedPaths.has(p));
+
+    // ── Dependency-aware delta invalidation ──────────────────────────────────
+    // A changed helper/module must also invalidate files that import it, even
+    // when those files are unchanged in the git diff. Strategy: build the
+    // reverse import graph from all PR files we now have content for (fetched
+    // files) PLUS a second pass to fetch any newly-discovered dependents.
+    if (isDelta && prevScan && changedPaths.size > 0) {
+      const contentMap = new Map<string, string | null>(fileContents.map(f => [f.path, f.content]));
+      // Also add prev-scan files at null content so the graph knows they exist
+      // (import-resolution needs the full path set even when content isn't available).
+      for (const f of prevScan.files) {
+        if (!contentMap.has(f.file_path)) contentMap.set(f.file_path, null);
+      }
+      const expanded = expandWithDependents(changedPaths, contentMap);
+      if (expanded.size > changedPaths.size) {
+        // Some unchanged files were found to depend on changed files. Fetch their
+        // content now so the scanner can re-analyse them.
+        const newlyInvalidated = [...expanded].filter(
+          p => !changedPaths.has(p) && allScannablePaths.includes(p) && !fetchedPaths.has(p),
+        );
+        if (newlyInvalidated.length > 0) {
+          const extra = await fetchFileContents(token, owner, repoName, headSha, newlyInvalidated);
+          fileContents = [...fileContents, ...extra];
+          for (const f of extra) fetchedPaths.add(f.path);
+          unreadPaths = pathsToFetch.filter(p => !fetchedPaths.has(p));
+        }
+        changedPaths = expanded;
+        void recordEvent({
+          kind: "scan.dep_invalidation",
+          data: { raw_changed: changedPaths.size - (expanded.size - changedPaths.size), expanded: expanded.size, extra: newlyInvalidated.length },
+        });
+      }
+    }
 
     // Files to scan but none readable (rate limit, timeout, GitHub outage) is NOT "no scannable files": that
     // used to complete the check as neutral, so an unscanned PR could merge. Fail closed and let the queue retry.
@@ -442,8 +480,18 @@ async function handle(req: NextRequest) {
         // Health and telemetry (scanHealth.ts): a separate, best-effort write so a database without the
         // columns yet (migration 20260930) still records the scan itself.
         try {
+          // Enrich telemetry with scan reproducibility fields (task 5 §C).
+          const telemetryWithRepro = result.telemetry ? {
+            ...result.telemetry,
+            base_commit_sha:   beforeSha ?? null,
+            files_skipped:     prFiles.length - allScannablePaths.length,
+            completion_status: (result.health?.gap_counts?.["time-budget"] ?? 0) > 0
+              ? ("timeout" as const) : result.health?.status === "complete"
+              ? ("complete" as const) : ("partial" as const),
+            dep_expanded_files: isDelta ? Math.max(0, changedPaths.size - (isDelta && beforeSha ? 0 : changedPaths.size)) : 0,
+          } : null;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          await (db.from("scans") as any).update({ health: result.health ?? null, telemetry: result.telemetry ?? null }).eq("id", scan.id);
+          await (db.from("scans") as any).update({ health: result.health ?? null, telemetry: telemetryWithRepro }).eq("id", scan.id);
         } catch { /* best-effort */ }
         if (result.telemetry) {
           logger.info("Scan telemetry", { event: "scan_telemetry", health: result.health?.status, engines_warm_ms: warm.ms, ...result.telemetry });

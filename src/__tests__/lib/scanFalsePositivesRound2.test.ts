@@ -98,10 +98,15 @@ describe("Go md5/sha1 used as a non-security cache key", () => {
 });
 
 describe("TOCTOU in JS: same-variable and mkdir exclusion", () => {
-  it("existsSync + writeFile on the SAME variable is a race; on a DIFFERENT variable it is not", () => {
-    const same = `import fs from "fs";\nfunction save(p, data) {\n  if (!fs.existsSync(p)) {\n    fs.writeFileSync(p, data);\n  }\n}\n`;
-    expect(ids("src/save.ts", same)).toContain("toctou");
-    const diff = `import fs from "fs";\nfunction setup(dir, file) {\n  if (!fs.existsSync(dir)) {\n    fs.writeFileSync(file, "init");\n  }\n}\n`;
+  it("existsSync + writeFile on a request-derived path is a race; on a constant/param path it is not", () => {
+    // request-derived path: req.body.path → tainted → TOCTOU
+    const tainted = `import fs from "fs";\napp.post("/upload", (req, res) => {\n  const p = req.body.path;\n  if (!fs.existsSync(p)) {\n    fs.writeFileSync(p, req.body.data);\n  }\n});\n`;
+    expect(ids("src/upload.ts", tainted)).toContain("toctou");
+    // constant config path not from request: no TOCTOU (build-tool/config pattern)
+    const constant = `import fs from "fs";\nfunction save(p, data) {\n  if (!fs.existsSync(p)) {\n    fs.writeFileSync(p, data);\n  }\n}\n`;
+    expect(ids("src/save.ts", constant)).not.toContain("toctou");
+    // different variables: even when tainted, different-variable pair is not a race
+    const diff = `import fs from "fs";\napp.get("/check", (req, res) => {\n  const dir = req.query.dir;\n  if (!fs.existsSync(dir)) {\n    fs.writeFileSync("other.txt", "init");\n  }\n});\n`;
     expect(ids("src/setup.ts", diff)).not.toContain("toctou");
   });
   it("existsSync + mkdirSync is idiomatic 'create if not exists', not a race", () => {
@@ -120,5 +125,28 @@ describe("dangerouslySetInnerHTML with a constant script", () => {
   it("a script that interpolates a variable is still reported", () => {
     const code = `export default function Layout({ name }: { name: string }) {\n  const script = \`window.user = "\${name}";\`;\n  return <script dangerouslySetInnerHTML={{ __html: script }} />;\n}\n`;
     expect(ids("app/layout.tsx", code)).toContain("xss");
+  });
+});
+
+describe("Node.js and Python md5/sha1 used as a non-security cache key", () => {
+  it("createHash('md5') inside a cacheKey function is not flagged", () => {
+    const cacheKey = `import crypto from "node:crypto";\nfunction cacheKey(url: string) {\n  return crypto.createHash("md5").update(url).digest("hex");\n}\n`;
+    expect(ids("src/cache.ts", cacheKey)).not.toContain("weak-crypto");
+  });
+  it("createHash('md5') for an etag is not flagged", () => {
+    const etag = `import { createHash } from "crypto";\nfunction etag(body: Buffer): string {\n  return createHash("md5").update(body).digest("hex");\n}\n`;
+    expect(ids("src/etag.ts", etag)).not.toContain("weak-crypto");
+  });
+  it("createHash('md5') in an unrelated context is still flagged", () => {
+    const noCtx = `import { createHash } from "crypto";\nfunction sign(payload: string) {\n  return createHash("md5").update(payload).digest("hex");\n}\n`;
+    expect(ids("src/sign.ts", noCtx)).toContain("weak-crypto");
+  });
+  it("hashlib.md5 inside a get_cache_key function is not flagged (Python)", () => {
+    const cacheKey = `import hashlib\n\ndef get_cache_key(path: str) -> str:\n    return hashlib.md5(path.encode()).hexdigest()\n`;
+    expect(ids("utils/cache.py", cacheKey)).not.toContain("weak-crypto");
+  });
+  it("hashlib.md5 of a password argument is still flagged (Python password-context gate)", () => {
+    const password = `import hashlib\n\ndef hash_password(password: str) -> str:\n    return hashlib.md5(password.encode()).hexdigest()\n`;
+    expect(ids("auth/hash.py", password)).toContain("weak-crypto");
   });
 });

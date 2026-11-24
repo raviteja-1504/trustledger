@@ -1,0 +1,264 @@
+// DVCSharp API-pattern benchmark fixture (C# / ASP.NET Core)
+// Cases 01-13: vulnerable patterns modelled on DVCSharp API
+// Cases 71-78: negative (safe) patterns — MUST NOT trigger a finding
+// BENCHMARK ONLY — DO NOT DEPLOY.
+
+using Microsoft.AspNetCore.Mvc;
+using System.Data.SqlClient;
+using System.Diagnostics;
+using System.Net.Http;
+using System.Text.RegularExpressions;
+using System.Runtime.Serialization.Formatters.Binary;
+using Newtonsoft.Json;
+
+[ApiController]
+[Route("[controller]")]
+public class VulnerableController : ControllerBase
+{
+    private readonly string _connStr = "Server=.;Database=dvcs;";
+    private readonly HttpClient _http = new();
+
+    // 01
+    // SQL injection — string concatenation in SqlCommand (DVCSharp /api/user)
+    [HttpGet("user")]
+    public IActionResult GetUser(string id)
+    {
+        using var conn = new SqlConnection(_connStr);
+        conn.Open();
+        var cmd = new SqlCommand("SELECT * FROM Users WHERE Id = '" + id + "'", conn);
+        using var reader = cmd.ExecuteReader();
+        return Ok(reader.Read() ? reader["Name"] : null);
+    }
+
+    // 02
+    // SQL injection — string interpolation in SqlCommand (DVCSharp /api/search)
+    [HttpGet("search")]
+    public IActionResult SearchProducts(string term)
+    {
+        using var conn = new SqlConnection(_connStr);
+        conn.Open();
+        var cmd = new SqlCommand($"SELECT * FROM Products WHERE Name LIKE '%{term}%'", conn);
+        using var reader = cmd.ExecuteReader();
+        return Ok(new List<string>());
+    }
+
+    // 03
+    // Command injection — Process.Start with shell (DVCSharp /api/ping)
+    [HttpGet("ping")]
+    public IActionResult Ping(string host)
+    {
+        var proc = Process.Start(new ProcessStartInfo
+        {
+            FileName        = "cmd.exe",
+            Arguments       = $"/c ping -n 1 {host}",
+            UseShellExecute = true,
+        });
+        proc.WaitForExit();
+        return Ok("done");
+    }
+
+    // 04
+    // SSRF — HttpClient.GetAsync with user URL (DVCSharp /api/fetch)
+    [HttpGet("fetch")]
+    public async Task<IActionResult> FetchUrl(string url)
+    {
+        var response = await _http.GetAsync(url);
+        var content  = await response.Content.ReadAsStringAsync();
+        return Ok(content);
+    }
+
+    // 05
+    // SSRF — forwarding user path to internal service
+    [HttpGet("internal")]
+    public async Task<IActionResult> InternalProxy(string path)
+    {
+        var resp = await _http.GetAsync("http://internal-api/" + path);
+        return Ok(await resp.Content.ReadAsStringAsync());
+    }
+
+    // 06
+    // Path traversal — System.IO.File.ReadAllText with user path
+    [HttpGet("file")]
+    public IActionResult ReadFile(string name)
+    {
+        var filePath = Path.Combine("/srv/uploads", name);
+        var content  = System.IO.File.ReadAllText(filePath);
+        return Ok(content);
+    }
+
+    // 07
+    // Insecure deserialization — BinaryFormatter (DVCSharp /api/deserialize)
+    [HttpPost("deserialize")]
+    public IActionResult Deserialize()
+    {
+        var formatter = new BinaryFormatter();
+        var obj       = formatter.Deserialize(Request.Body);
+        return Ok(obj?.ToString());
+    }
+
+    // 08
+    // Auth weakness — hardcoded API key (DVCSharp /api/admin)
+    private const string AdminKey = "dvcsharp-admin-key-2024";
+
+    [HttpGet("admin")]
+    public IActionResult AdminAction([FromHeader(Name = "X-API-Key")] string key)
+    {
+        if (key != AdminKey) return Unauthorized();
+        return Ok("admin access granted");
+    }
+
+    // 09
+    // Auth weakness — JWT none algorithm (DVCSharp /api/jwt-verify)
+    [HttpPost("jwt-verify")]
+    public IActionResult VerifyToken([FromBody] TokenRequest req)
+    {
+        // Manually split token without verifying signature
+        var parts = req.Token.Split('.');
+        if (parts.Length == 3 && parts[2] == "")
+        {
+            return Ok("token accepted (alg=none)");
+        }
+        return Unauthorized();
+    }
+
+    // 10
+    // ReDoS — catastrophic backtracking in email regex (DVCSharp /api/validate)
+    [HttpGet("validate")]
+    public IActionResult ValidateEmail(string email)
+    {
+        var re  = new Regex(@"^(a+)+$");
+        var ok  = re.IsMatch(email);
+        return Ok(new { valid = ok });
+    }
+
+    // 11
+    // Secrets exposure — hardcoded connection string with password (DVCSharp config)
+    private readonly string _connStrSecrets =
+        "Server=prod-db;Database=dvcs;User Id=sa;Password=P@ssw0rd!;";
+
+    [HttpGet("db-info")]
+    public IActionResult DbInfo()
+    {
+        return Ok(new { server = "prod-db" });
+    }
+
+    // 12
+    // AuthZ weakness — no ownership check on /api/document (DVCSharp BOLA)
+    [HttpGet("document")]
+    public IActionResult GetDocument(int documentId)
+    {
+        using var conn = new SqlConnection(_connStr);
+        conn.Open();
+        var cmd = new SqlCommand(
+            $"SELECT * FROM Documents WHERE Id = {documentId}", conn);
+        using var reader = cmd.ExecuteReader();
+        return Ok(reader.Read() ? reader["Content"] : null);
+    }
+
+    // 13
+    // XSS — returning raw user HTML from API endpoint
+    [HttpGet("preview")]
+    public IActionResult Preview(string html)
+    {
+        return Content("<div>" + html + "</div>", "text/html");
+    }
+}
+
+// -- Negative (safe) patterns --------------------------------------------------
+
+[ApiController]
+[Route("safe/[controller]")]
+public class SafeController : ControllerBase
+{
+    private readonly string _connStr = "Server=.;Database=dvcs;";
+    private readonly HttpClient _http = new();
+
+    // 71
+    // SAFE SQL — SqlParameter placeholders
+    [HttpGet("user")]
+    public IActionResult SafeGetUser(string id)
+    {
+        using var conn = new SqlConnection(_connStr);
+        conn.Open();
+        var cmd = new SqlCommand("SELECT * FROM Users WHERE Id = @Id", conn);
+        cmd.Parameters.AddWithValue("@Id", id);
+        using var reader = cmd.ExecuteReader();
+        return Ok(reader.Read() ? reader["Name"] : null);
+    }
+
+    // 72
+    // SAFE command — Process.Start with explicit arg list, no shell
+    [HttpGet("ping")]
+    public IActionResult SafePing(string host)
+    {
+        var proc = Process.Start(new ProcessStartInfo
+        {
+            FileName        = "ping",
+            Arguments       = $"-n 1 {System.Web.HttpUtility.HtmlEncode(host)}",
+            UseShellExecute = false,
+        });
+        proc.WaitForExit();
+        return Ok("done");
+    }
+
+    // 73
+    // SAFE SSRF — URL validated against an allowlist before HttpClient call
+    private static readonly HashSet<string> AllowedHosts = new() { "api.example.com" };
+
+    [HttpGet("fetch")]
+    public async Task<IActionResult> SafeFetchUrl(string url)
+    {
+        var uri = new Uri(url);
+        if (!AllowedHosts.Contains(uri.Host)) return Forbid();
+        var response = await _http.GetAsync(uri);
+        return Ok(await response.Content.ReadAsStringAsync());
+    }
+
+    // 74
+    // SAFE path — Path.GetFileName to strip traversal
+    [HttpGet("file")]
+    public IActionResult SafeReadFile(string name)
+    {
+        var safeName = Path.GetFileName(name);
+        var filePath = Path.Combine("/srv/uploads", safeName);
+        return Ok(System.IO.File.ReadAllText(filePath));
+    }
+
+    // 75
+    // SAFE deserialization — System.Text.Json (not BinaryFormatter)
+    [HttpPost("deserialize")]
+    public IActionResult SafeDeserialize()
+    {
+        using var reader = new System.IO.StreamReader(Request.Body);
+        var json = reader.ReadToEnd();
+        var obj  = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+        return Ok(obj);
+    }
+
+    // 76
+    // SAFE secrets — connection string from environment / config
+    private readonly string _safeConnStr = Environment.GetEnvironmentVariable("DB_CONN_STR") ?? "";
+
+    [HttpGet("db-info")]
+    public IActionResult SafeDbInfo() => Ok(new { server = "configured" });
+
+    // 77
+    // SAFE ReDoS — deterministic regex with no catastrophic backtracking
+    [HttpGet("validate")]
+    public IActionResult SafeValidateEmail(string email)
+    {
+        var re = new Regex(@"^[^@]+@[^@]+\.[^@]+$", RegexOptions.None, TimeSpan.FromMilliseconds(100));
+        return Ok(new { valid = re.IsMatch(email) });
+    }
+
+    // 78
+    // SAFE XSS — HTML-encoded output via HtmlEncoder
+    [HttpGet("preview")]
+    public IActionResult SafePreview(string text)
+    {
+        var safe = System.Net.WebUtility.HtmlEncode(text);
+        return Content($"<div>{safe}</div>", "text/html");
+    }
+}
+
+public class TokenRequest { public string Token { get; set; } = ""; }

@@ -1,0 +1,27 @@
+{
+  "app":  "dvcsharp",
+  "path": "dvcsharp.cs",
+  "cases": {
+    "01": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via string concatenation in SqlCommand" },
+    "02": { "category": "sqli",                    "cwe": 89,  "negative": false, "label": "SQL injection via string interpolation in SqlCommand" },
+    "03": { "category": "cmdi",                    "cwe": 78,  "negative": false, "label": "Command injection via Process.Start with cmd.exe shell" },
+    "04": { "category": "ssrf",                    "cwe": 918, "negative": false, "label": "SSRF via HttpClient.GetAsync with user URL" },
+    "05": { "category": "ssrf",                    "cwe": 918, "negative": false, "label": "SSRF via path concat to internal service" },
+    "06": { "category": "path-traversal",          "cwe": 22,  "negative": false, "label": "Path traversal via File.ReadAllText with user path" },
+    "07": { "category": "insecure-deserialization","cwe": 502, "negative": false, "label": "Insecure deserialization via BinaryFormatter" },
+    "08": { "category": "auth-weakness",           "cwe": 798, "negative": false, "label": "Hardcoded API key" },
+    "09": { "category": "auth-weakness",           "cwe": 347, "negative": false, "label": "JWT none algorithm via manual split" },
+    "10": { "category": "redos",                   "cwe": 400, "negative": false, "label": "ReDoS via catastrophic backtracking regex" },
+    "11": { "category": "secrets-exposure",        "cwe": 798, "negative": false, "label": "Hardcoded DB connection string with password" },
+    "12": { "category": "authz-weakness",          "cwe": 639, "negative": false, "label": "Missing ownership check on Document endpoint" },
+    "13": { "category": "xss",                     "cwe": 79,  "negative": false, "label": "XSS via raw HTML output from user input" },
+    "71": { "category": "sqli",                    "cwe": 89,  "negative": true,  "label": "SAFE: SqlParameter placeholders" },
+    "72": { "category": "cmdi",                    "cwe": 78,  "negative": true,  "label": "SAFE: Process.Start with no shell" },
+    "73": { "category": "ssrf",                    "cwe": 918, "negative": true,  "label": "SAFE: URL host validated against allowlist" },
+    "74": { "category": "path-traversal",          "cwe": 22,  "negative": true,  "label": "SAFE: Path.GetFileName to strip traversal" },
+    "75": { "category": "insecure-deserialization","cwe": 502, "negative": true,  "label": "SAFE: System.Text.Json instead of BinaryFormatter" },
+    "76": { "category": "secrets-exposure",        "cwe": 798, "negative": true,  "label": "SAFE: connection string from environment" },
+    "77": { "category": "redos",                   "cwe": 400, "negative": true,  "label": "SAFE: deterministic regex with timeout" },
+    "78": { "category": "xss",                     "cwe": 79,  "negative": true,  "label": "SAFE: HtmlEncode before output" }
+  }
+}

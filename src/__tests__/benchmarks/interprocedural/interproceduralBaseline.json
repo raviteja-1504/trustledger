@@ -86,5 +86,37 @@
   "JAVA-05": {
     "outcome": "pass",
     "twin": "clean"
+  },
+  "CS-01": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "CS-02": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "CS-03": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "CS-04": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PHP-01": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PHP-02": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PHP-03": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PHP-04": {
+    "outcome": "miss",
+    "twin": "clean"
   }
 }

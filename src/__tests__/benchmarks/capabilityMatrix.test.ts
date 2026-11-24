@@ -215,31 +215,10 @@ describe("capability matrix", () => {
 // The matrix is a regression guard AND a gap list. A case outside these lists that goes wrong is a regression and fails;
 // a case inside them that starts passing is an improvement and also fails, so the entry is removed here on purpose.
 // Gaps are listed, not hidden: each has a note on what is missing.
-const KNOWN_WRONG_DATAFLOW = [
-  // Aliases of objects/containers: a write through one name is not visible through the other (`const b = a; b.cmd = x; use(a.cmd)`).
-  "FN  javascript | pointer-alias | object alias",
-  "FN  python | pointer-alias | dict alias",
-  // The whole request object handed to a helper (`get(req)`, `run(req)`): `req` alone has no taint, only `req.query...` does. Seeding it
-  // needs per-field seeding (query/body/params/headers/cookies, not req.user), so it is not a one-line change.
-  "FN  javascript | return-value | taint returned vs dropped",
-];
-// Weaker rule-based detectors (a non-constant shell argument, a name-based "tainted variable" rule) report flows the AST engine proved
-// safe. Making `command-injection` an ENGINE_OWNED_RULES entry (scanner.ts) removes all of these (measured), but also the regex safety net
-// for the three gaps above, so it waits until those are closed.
-const KNOWN_WRONG_ANY = [
-  "FP  javascript | context-sensitive | same helper, tainted vs clean call",
-  "FP  javascript | cross-file | helper in another module",
-  "FP  javascript | field-sensitive | tainted vs clean property",
-  "FP  javascript | interprocedural | two helper hops",
-  "FP  javascript | path-sensitive | overwritten on every branch",
-  "FP  javascript | pointer-alias | object alias",
-  "FP  javascript | return-value | taint returned vs dropped",
-  "FP  python | context-sensitive | same helper, tainted vs clean call",
-  "FP  python | cross-file | helper in another module",
-  "FP  python | field-sensitive | tainted vs clean attribute",
-  "FP  python | interprocedural | two helper hops",
-  "FP  python | return-value | taint returned vs dropped",
-];
+const KNOWN_WRONG_DATAFLOW: string[] = [];
+// command-injection is now ENGINE_OWNED_RULES (scanner.ts): regex findings on engine-analysed files are dropped,
+// removing all 12 FPs the weaker "non-constant shell argument" / "named tainted variable" rules produced.
+const KNOWN_WRONG_ANY: string[] = [];
 
 describe("capability matrix: no silent change", () => {
   const wrong = (tierName: "any" | "dataflow") => outcomes.filter(o => (o[tierName] !== o.vulnerable)).map(o => `${o.vulnerable ? "FN" : "FP"}  ${o.key.replace(/ \| (vulnerable|safe)$/, "")}`).sort();
