@@ -38,7 +38,7 @@ export interface AttestParams {
 }
 
 export type AttestOutcome =
-  | { ok: true; attestation_id: string; payload_hash: string; attested_at: string; signed: boolean }
+  | { ok: true; attestation_id: string; payload_hash: string; attested_at: string; signed?: boolean }
   | { ok: false; reason: "scan_not_found" | "insert_failed"; detail?: unknown }
   | { ok: false; reason: "forbidden"; risk_score: string };
 
