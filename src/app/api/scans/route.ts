@@ -188,7 +188,7 @@ export async function POST(req: NextRequest) {
         indicators:        [],
         content_hash:      lr.content_hash,
         line_count:        lr.line_count,
-        attribution:       { model:"unknown" as const, confidence:0, signals:[], breakdown:{ "github-copilot":0,chatgpt:0,gemini:0,claude:0,codewhisperer:0,cursor:0,tabnine:0,human:0,unknown:0 }, humanEvidence:0 },
+        attribution:       { model:"unknown" as const, confidence:0, signals:[], contradictingSignals:[], breakdown:{ "github-copilot":0,chatgpt:0,gemini:0,claude:0,codewhisperer:0,cursor:0,tabnine:0,human:0,unknown:0 }, humanEvidence:0, insufficientEvidence:true, evidenceCategory:"statistical_stylistic" as const, confidenceLimitations:[], engineVersion:"3.1" },
         scan_quality:      0,
         fix_suggestions:   [],
         watermarks:        [],

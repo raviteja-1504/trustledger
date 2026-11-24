@@ -12,7 +12,7 @@ import { currentTrace, newTraceId } from "@/lib/trace";
 export type OpsEventKind =
   | "webhook.received" | "webhook.ignored"
   | "scan.queued" | "scan.enqueue_failed" | "scan.started" | "scan.skipped" | "scan.superseded"
-  | "scan.files_fetched" | "scan.completed" | "scan.failed"
+  | "scan.files_fetched" | "scan.completed" | "scan.failed" | "scan.dep_invalidation"
   | "checkrun.updated" | "checkrun.failed"
   | "api.error"
   | "pipeline.stuck";

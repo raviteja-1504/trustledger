@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
   if (error) return safeError(error, { code: "records_fetch_failed", message: "Could not fetch evidence records." });
 
   const records = (data ?? [])
-    .map(row => rowToEvidenceRecord(row as Parameters<typeof rowToEvidenceRecord>[0]))
+    .map(row => rowToEvidenceRecord(row as unknown as Parameters<typeof rowToEvidenceRecord>[0]))
     .filter(r => r !== null)
     .filter(r => !status || r!.verification_status === status);
 

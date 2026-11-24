@@ -8733,7 +8733,7 @@ export function analyzeFile(
     risk_indicators: [], indicators: [],
     content_hash: crypto.createHash("sha256").update(content ?? "").digest("hex"),
     line_count: 0, scan_quality: 0,
-    attribution: { model:"unknown", confidence:0, signals:[], breakdown:{"github-copilot":0,chatgpt:0,gemini:0,claude:0,codewhisperer:0,cursor:0,tabnine:0,human:0,unknown:1}, humanEvidence:0 },
+    attribution: { model:"unknown", confidence:0, signals:[], contradictingSignals:[], breakdown:{"github-copilot":0,chatgpt:0,gemini:0,claude:0,codewhisperer:0,cursor:0,tabnine:0,human:0,unknown:1}, humanEvidence:0, insufficientEvidence:true, evidenceCategory:"statistical_stylistic" as const, confidenceLimitations:[], engineVersion:"3.1" },
     fix_suggestions: [], watermarks: [], supply_chain: emptySupplyChain(),
     behavioral_risk: emptyBehavioral(), provenance: emptyProvenance(),
     line_attribution: [], explained_signals: [],

@@ -44,7 +44,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   const { data: row, error } = await fetchRow(db, id, auth.org_id);
   if (error || !row) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const record = rowToEvidenceRecord(row as Parameters<typeof rowToEvidenceRecord>[0]);
+  const record = rowToEvidenceRecord(row as unknown as Parameters<typeof rowToEvidenceRecord>[0]);
   if (!record) return NextResponse.json({ error: "legacy_record_format" }, { status: 422 });
 
   return NextResponse.json({ record });
@@ -61,7 +61,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const { data: row, error: fetchErr } = await fetchRow(db, id, auth.org_id);
   if (fetchErr || !row) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const record = rowToEvidenceRecord(row as Parameters<typeof rowToEvidenceRecord>[0]);
+  const record = rowToEvidenceRecord(row as unknown as Parameters<typeof rowToEvidenceRecord>[0]);
   if (!record) return NextResponse.json({ error: "legacy_record_format" }, { status: 422 });
 
   type Body = { action: "verify" | "revoke" | "refresh"; payload?: string; reason?: string };

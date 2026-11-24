@@ -69,7 +69,7 @@ export async function GET(req: NextRequest) {
   if (rowErr) return safeError(rowErr, { code: "export_fetch_failed", message: "Could not load evidence records." });
 
   const records = (rows ?? [])
-    .map(row => rowToEvidenceRecord(row as Parameters<typeof rowToEvidenceRecord>[0]))
+    .map(row => rowToEvidenceRecord(row as unknown as Parameters<typeof rowToEvidenceRecord>[0]))
     .filter((r): r is NonNullable<typeof r> => r !== null);
 
   // Load audit trail for evidence collection in the period.
@@ -169,7 +169,7 @@ export async function GET(req: NextRequest) {
     actor_id:      auth.user_id ?? null,
     actor_email:   auth.actor_email ?? null,
     resource_type: "evidence_export",
-    resource_id:   null,
+    resource_id:   undefined,
     payload: {
       framework:        fw.framework_id,
       period_start:     periodStart,
