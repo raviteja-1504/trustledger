@@ -169,6 +169,14 @@ describe("cipher use", () => {
     expect(enc("AES-256-GCM", "  cipher.iv = cipher.random_iv")).not.toContain("weak-crypto");
     expect(enc("AES-256-CBC", "  cipher.iv = cipher.random_iv\n  mac = OpenSSL::HMAC.hexdigest('SHA256', mac_key, 'x')")).not.toContain("weak-crypto");
   });
+  it("CBC with a protocol-mandate comment is not flagged; without the comment it still is", () => {
+    // Legacy payment gateway requires AES-CBC; comment suppresses the finding
+    const ids2 = (body: string) => ids(handler(body));
+    const withComment = `  # Required by legacy payment gateway (partner mandated AES-CBC)\n  cipher = OpenSSL::Cipher.new('AES-256-CBC')\n  cipher.encrypt\n  cipher.key = cipher.random_key\n  cipher.iv = cipher.random_iv\n`;
+    expect(ids2(withComment)).not.toContain("weak-crypto");
+    const noComment = `  cipher = OpenSSL::Cipher.new('AES-256-CBC')\n  cipher.encrypt\n  cipher.key = cipher.random_key\n  cipher.iv = cipher.random_iv\n`;
+    expect(ids2(noComment)).toContain("weak-crypto");
+  });
 });
 
 describe("an alphabet does not make reflection safe", () => {

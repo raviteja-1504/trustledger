@@ -66,7 +66,6 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/app/api/me/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/orgs/create/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/orgs/reset/route.ts", table: "violations", op: "delete", keys: ["scan_id"], why: "parent-verified" },
-  { file: "src/app/api/orgs/reset/route.ts", table: "attestations", op: "delete", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/orgs/reset/route.ts", table: "secret_findings", op: "delete", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/orgs/reset/route.ts", table: "scan_files", op: "delete", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/orgs/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
@@ -105,6 +104,14 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/lib/attestation.ts", table: "scan_files", op: "select", keys: ["scan_id","file_path"], why: "parent-verified" },
   { file: "src/lib/attestation.ts", table: "attestations", op: "select", keys: ["scan_id","file_path"], why: "parent-verified" },
   { file: "src/lib/attestation.ts", table: "scan_files", op: "update", keys: ["scan_id","file_path"], why: "parent-verified" },
+  // signing_keys stores platform-wide Ed25519 public keys (org_id = null for the platform key).
+  // ensureSigningKey calls this twice: once to check if the key already exists, and once in the race-
+  // recovery path when a concurrent insert hits the unique constraint. Both filter by is("org_id", null)
+  // + eq("public_key_pem", …) — a credential-lookup for a platform-scoped (org_id = null) key.
+  { file: "src/lib/attestationSigning.ts", table: "signing_keys", op: "select", keys: ["org_id","public_key_pem"], why: "credential-lookup", count: 2 },
+  // verifyAttestation looks up the key by id taken from attestation.signing_key_id, which came from an
+  // org-scoped attestation row (org_id filter already applied by the caller before passing the id).
+  { file: "src/lib/attestationSigning.ts", table: "signing_keys", op: "select", keys: ["id"], why: "parent-verified" },
   { file: "src/lib/dashboardAggregate.ts", table: "attestations", op: "select", keys: ["scan_id","risk_score"], count: 2, why: "parent-verified" },
   { file: "src/lib/dashboardAggregate.ts", table: "violations", op: "select", keys: ["scan_id","risk_score"], count: 2, why: "parent-verified" },
   { file: "src/lib/dashboardAggregate.ts", table: "scan_files", op: "select", keys: ["scan_id","risk_score"], why: "parent-verified" },

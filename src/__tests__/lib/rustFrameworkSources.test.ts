@@ -121,6 +121,9 @@ const cases: Array<[string, string, string]> = [
  ["tokio BufReader lines", "command-injection", `use tokio::{io::{AsyncBufReadExt, BufReader}, net::TcpStream};\nuse std::process::Command;\nasync fn h(s: TcpStream) {\n    let mut lines = BufReader::new(s).lines();\n    while let Some(l) = lines.next_line().await.unwrap() {\n        Command::new(l).output().unwrap();\n    }\n}\n`],
  ["std stdin read_line", "command-injection", `use std::process::Command;\nfn main() {\n    let mut s = String::new();\n    std::io::stdin().read_line(&mut s).unwrap();\n    Command::new(s.trim()).output().unwrap();\n}\n`],
  ["env args", "command-injection", `use std::process::Command;\nfn main() {\n    let a: Vec<String> = std::env::args().collect();\n    Command::new(&a[1]).output().unwrap();\n}\n`],
+ // CLI tools intentionally accept user-provided paths as args -- path-traversal from env::args is a false positive;
+ // env::var (injected via environment) is a real source for path traversal.
+ ["env args path not flagged", "!path-traversal", `fn main() {\n    let a: Vec<String> = std::env::args().collect();\n    std::fs::read(&a[1]).unwrap();\n}\n`],
  ["env var", "path-traversal", `fn main() {\n    let p = std::env::var("CFG").unwrap();\n    std::fs::read(p).unwrap();\n}\n`],
  ["tokio UdpSocket recv_from", "path-traversal", `use tokio::net::UdpSocket;\nasync fn h(s: UdpSocket) {\n    let mut buf = [0u8; 512];\n    let (n, _) = s.recv_from(&mut buf).await.unwrap();\n    std::fs::read(String::from_utf8_lossy(&buf[..n]).to_string()).unwrap();\n}\n`],
  ["tokio spawn_blocking cmd", "command-injection", `use axum::extract::Query;\nuse std::process::Command;\nasync fn h(Query(q): Query<Q>) {\n    tokio::task::spawn_blocking(move || { Command::new(q.cmd).output().unwrap(); }).await.unwrap();\n}\n`],

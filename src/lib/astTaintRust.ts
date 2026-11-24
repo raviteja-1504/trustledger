@@ -703,8 +703,13 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
 
     // hyper::body::to_bytes(req) / aggregate(req): the whole request, body included
     if (fullPath && /(?:^|::)(?:to_bytes|aggregate)$/.test(fullPath) && args[0] && isRequestValue(args[0], env, ctx)) return ALL;
-    // the process's own input: command line and environment
-    if (fullPath && /(?:^|::)env::(?:args|args_os|var|var_os)$/.test(fullPath)) return ALL;
+    // the process's own input: command line and environment.
+    // env::var / env::var_os (environment variables) are dangerous for all sinks including path traversal.
+    // env::args / env::args_os are CLI arguments: flagging path-traversal from them generates 100+ false positives
+    // in CLI tools (the whole point of the tool is to accept user-provided paths). Command injection from args
+    // is still real (args flowing to Command::new), so CMD is kept; only PATH is excluded.
+    if (fullPath && /(?:^|::)env::(?:var|var_os)$/.test(fullPath)) return ALL;
+    if (fullPath && /(?:^|::)env::(?:args|args_os)$/.test(fullPath)) return ALL & ~SinkClass.PATH;
     // `stdin().lines()` / `BufReader::new(stream).lines()`: what a peer or the terminal sent
     if (recv && /^(?:lines|read_line|next_line)$/.test(name) && isNetworkReader(recv, ctx)) return ALL;
     // request accessors: req.headers() / req.match_info() / request.uri()

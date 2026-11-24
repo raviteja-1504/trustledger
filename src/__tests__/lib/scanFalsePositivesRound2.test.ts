@@ -66,6 +66,12 @@ describe("SQL built from a list of bind placeholders", () => {
     expect(ids("src/store.ts", q(`keys.map(() => "?").join(", ")`))).not.toContain("sql-injection");
     expect(ids("src/store.ts", q(`keys.join(", ")`))).toContain("sql-injection");
   });
+  it("db.exec() with a template literal is not command injection; exec() alone still is", () => {
+    // db.exec / sqlite3.exec are SQL calls, not shell commands; child_process.exec is still caught by its own rule
+    expect(ids("src/store.ts", q(`keys.join(", ")`))).not.toContain("command-injection");
+    const shell = `import { exec } from "child_process";\nconst n = req.query.name;\nexec(\`ls \${n}\`);\n`;
+    expect(ids("src/run.ts", shell)).toContain("command-injection");
+  });
   it("a placeholder list held in a variable counts the same", () => {
     const code = `export function drop(db: any, keys: string[]) {\n  const placeholders = keys.map(() => "?").join(", ");\n  db.exec(\`DELETE FROM pending WHERE object_key IN (\${placeholders})\`, ...keys);\n}\n`;
     expect(ids("src/store.ts", code)).not.toContain("sql-injection");
@@ -73,6 +79,34 @@ describe("SQL built from a list of bind placeholders", () => {
   it("a concatenated value next to an unrelated placeholder list is still reported", () => {
     const code = `export function find(db: any, name: string, keys: string[]) {\n  const marks = keys.map(() => "?").join(", ");\n  db.exec("SELECT * FROM t WHERE name = '" + name + "' AND k IN (" + marks + ")", ...keys);\n}\n`;
     expect(ids("src/store.ts", code)).toContain("sql-injection");
+  });
+});
+
+describe("Go md5/sha1 used as a non-security cache key", () => {
+  it("md5.Sum for a cache key is not flagged; md5.Sum of a password is", () => {
+    const cacheKey = `package main\n\nimport (\n\t"crypto/md5"\n\t"fmt"\n)\n\nfunc cacheKey(url string) string {\n\treturn fmt.Sprintf("%x", md5.Sum([]byte(url)))\n}\n`;
+    expect(ids("store.go", cacheKey)).not.toContain("weak-crypto");
+    const password = `package main\n\nimport (\n\t"crypto/md5"\n\t"fmt"\n)\n\nfunc hashPw(pw string) string {\n\treturn fmt.Sprintf("%x", md5.Sum([]byte(pw)))\n}\n`;
+    expect(ids("auth.go", password)).toContain("weak-crypto");
+  });
+  it("sha1 ETag computation is not flagged; sha1 of a secret still is", () => {
+    const etag = `package main\n\nimport (\n\t"crypto/sha1"\n\t"fmt"\n)\n\nfunc etag(content []byte) string {\n\treturn fmt.Sprintf("%x", sha1.Sum(content))\n}\n`;
+    expect(ids("etag.go", etag)).not.toContain("weak-crypto");
+    const token = `package main\n\nimport (\n\t"crypto/sha1"\n\t"fmt"\n)\n\nfunc sign(secret string) string {\n\treturn fmt.Sprintf("%x", sha1.Sum([]byte(secret)))\n}\n`;
+    expect(ids("sign.go", token)).toContain("weak-crypto");
+  });
+});
+
+describe("TOCTOU in JS: same-variable and mkdir exclusion", () => {
+  it("existsSync + writeFile on the SAME variable is a race; on a DIFFERENT variable it is not", () => {
+    const same = `import fs from "fs";\nfunction save(p, data) {\n  if (!fs.existsSync(p)) {\n    fs.writeFileSync(p, data);\n  }\n}\n`;
+    expect(ids("src/save.ts", same)).toContain("toctou");
+    const diff = `import fs from "fs";\nfunction setup(dir, file) {\n  if (!fs.existsSync(dir)) {\n    fs.writeFileSync(file, "init");\n  }\n}\n`;
+    expect(ids("src/setup.ts", diff)).not.toContain("toctou");
+  });
+  it("existsSync + mkdirSync is idiomatic 'create if not exists', not a race", () => {
+    const mkdir = `import fs from "fs";\nfunction ensureDir(dir) {\n  if (!fs.existsSync(dir)) {\n    fs.mkdirSync(dir, { recursive: true });\n  }\n}\n`;
+    expect(ids("src/ensureDir.ts", mkdir)).not.toContain("toctou");
   });
 });
 

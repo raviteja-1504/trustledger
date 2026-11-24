@@ -2753,6 +2753,7 @@ function weakCipherUsesGo(root: SyntaxNode): Array<{ node: SyntaxNode; expr: str
     const calls = findAllNodesGo(body, "call_expression");
     const callee = (c: SyntaxNode) => c.childForFieldName("function")?.text ?? "";
     const argsOf = (c: SyntaxNode) => (c.childForFieldName("arguments")?.namedChildren ?? []).filter((a): a is SyntaxNode => !!a);
+    const enclosingGoFnName = fn.childForFieldName("name")?.text ?? "";
     for (const c of calls) {
       if (/^(?:blowfish|cast5|tea|xtea)\.NewCipher$/.test(callee(c))) {
         out.push({ node: c, expr: callee(c), detail: `${callee(c)} is a 64-bit-block / broken cipher — use AES-GCM or ChaCha20-Poly1305` });
@@ -2772,8 +2773,11 @@ function weakCipherUsesGo(root: SyntaxNode): Array<{ node: SyntaxNode; expr: str
       const fnName = callee(c);
       const ivArg = /^cipher\.(?:NewCBCEncrypter|NewCBCDecrypter|NewCTR|NewCFBEncrypter|NewCFBDecrypter|NewOFB)$/.test(fnName) ? argsOf(c)[1]
         : /\.Seal$/.test(fnName) && argsOf(c).length === 4 ? argsOf(c)[1] : undefined;
-      // an unauthenticated mode: the ciphertext can be altered undetected (and CBC padding becomes an oracle)
-      if (!authenticated && /^cipher\.(?:NewCBCEncrypter|NewCBCDecrypter|NewCTR|NewCFBEncrypter|NewCFBDecrypter|NewOFB)$/.test(fnName)) {
+      // an unauthenticated mode: the ciphertext can be altered undetected (and CBC padding becomes an oracle).
+      // Suppress when the enclosing function name signals a protocol-mandated or legacy-compat context
+      // (e.g. migrateLegacyData, decryptPKCS8Key, partnerEncrypt) where CBC is required by an external spec.
+      if (!authenticated && /^cipher\.(?:NewCBCEncrypter|NewCBCDecrypter|NewCTR|NewCFBEncrypter|NewCFBDecrypter|NewOFB)$/.test(fnName)
+          && !/(?:legacy|compat|migrat|pkcs|pbes|interop|partner|payment|gateway|mandate|backcompat|backward)/i.test(enclosingGoFnName)) {
         out.push({ node: c, expr: fnName, detail: `${fnName} encrypts without authentication and nothing in this file adds a MAC — an attacker can modify the ciphertext undetected (CBC padding errors become a decryption oracle); use AES-GCM, or encrypt-then-HMAC` });
       }
       if (!ivArg || ivArg.type !== "identifier") continue;
@@ -3256,8 +3260,15 @@ export function scanAstTaintGo(
       const fnTextAll = fn ? calleeTextGo(fn) : null;
       // weak digests / ciphers (not taint-based)
       if (fnTextAll && /^(?:md5\.(?:Sum|New)|sha1\.(?:Sum|New)|des\.NewCipher|des\.NewTripleDESCipher|rc4\.NewCipher)$/.test(fnTextAll)) {
-        emit("weak-crypto", node, fnTextAll, fnTextAll,
-          `${fnTextAll} is a broken/weak primitive — use SHA-256+ (and bcrypt/argon2 for passwords) or AES-GCM`);
+        // md5/sha1 are routinely used as non-security checksums (ETag, cache key, dedup).
+        // Suppress when the enclosing function name indicates a non-security context.
+        const goHashNonSecurity = /^(?:md5|sha1)\./.test(fnTextAll)
+          && /\b(?:cache|etag|e_tag|checksum|check_sum|fingerprint|dedup|content_hash|hash_key|cacheKey|hashKey|digest_key|bucket|shard|partition|s3key|object_key|b2key|blob_key)\b/i
+            .test(findEnclosingFunctionNameGo(node));
+        if (!goHashNonSecurity) {
+          emit("weak-crypto", node, fnTextAll, fnTextAll,
+            `${fnTextAll} is a broken/weak primitive — use SHA-256+ (and bcrypt/argon2 for passwords) or AES-GCM`);
+        }
       }
       // decoding a request into a struct that has role/admin-like fields: the client chooses them
       const outParam = findOutParamGo(node, env, taintMask);

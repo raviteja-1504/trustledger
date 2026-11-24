@@ -45,7 +45,7 @@ describe("containerCompose.findComposePrivileged", () => {
 });
 
 describe("containerCompose.findComposeDockerSocketMount", () => {
-  it("flags a docker.sock volume mount", () => {
+  it("flags a docker.sock volume mount on a generic service", () => {
     const content = wrap("    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock");
     expect(findComposeDockerSocketMount(content).some(f => f.id === "container-compose-docker-socket-mount")).toBe(true);
   });
@@ -53,6 +53,35 @@ describe("containerCompose.findComposeDockerSocketMount", () => {
   it("does not flag an ordinary volume mount", () => {
     const content = wrap("    volumes:\n      - ./data:/app/data");
     expect(findComposeDockerSocketMount(content)).toHaveLength(0);
+  });
+
+  it("does not flag a localstack service (mounts docker.sock by design to run Lambda containers)", () => {
+    const content = `services:\n  localstack:\n    image: localstack/localstack:3.0\n    environment:\n      - DOCKER_HOST=unix:///var/run/docker.sock\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n`;
+    expect(findComposeDockerSocketMount(content)).toHaveLength(0);
+  });
+
+  it("does not flag a portainer service (Docker UI, needs docker.sock by design)", () => {
+    const content = `services:\n  portainer:\n    image: portainer/portainer-ce:latest\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n`;
+    expect(findComposeDockerSocketMount(content)).toHaveLength(0);
+  });
+
+  it("does not flag a CI runner service (jenkins, buildkite-agent, gitlab-runner)", () => {
+    for (const svc of [
+      `services:\n  ci:\n    image: jenkins/jenkins:lts\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n`,
+      `services:\n  runner:\n    image: buildkite/agent:latest\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n`,
+    ]) {
+      expect(findComposeDockerSocketMount(svc)).toHaveLength(0);
+    }
+  });
+
+  it("does not flag a commented-out docker.sock line", () => {
+    const content = wrap("    volumes:\n      # - /var/run/docker.sock:/var/run/docker.sock");
+    expect(findComposeDockerSocketMount(content)).toHaveLength(0);
+  });
+
+  it("still flags a docker.sock mount on a service that is NOT a known Docker manager", () => {
+    const content = `services:\n  api:\n    image: node:20-alpine\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n`;
+    expect(findComposeDockerSocketMount(content).some(f => f.id === "container-compose-docker-socket-mount")).toBe(true);
   });
 });
 

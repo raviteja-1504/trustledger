@@ -40,12 +40,54 @@ export function findComposePrivileged(content: string): ScanIndicator[] {
 
 const DOCKER_SOCK_RE = /\/var\/run\/docker\.sock/;
 
+// Images / service names that require docker.sock by design and whose mount
+// is therefore intentional, not a misconfiguration. Suppressed entirely.
+const DOCKER_MANAGER_IMAGE_RE = /\b(?:localstack(?:\/localstack)?|portainer(?:\/portainer)?|rancher(?:\/rancher)?|watchtower|dokku|dagger(?:io\/engine)?|jenkins(?:\/jenkins)?|teamcity|buildkite[/-]agent|gitlab[/-]runner|drone(?:\/drone)?|harbor[/-](?:core|registry|jobservice)|verdaccio|nexus|ctop|lazydocker|docker[/-]gc|docker[/-]registry|docker\.io\/library\/docker|dind|docker:dind|gcr\.io\/kaniko|moby(?:\/buildkit)?|buildkitd|earthly(?:\/earthly)?)\b/i;
+// Service names that imply a CI/build role and intentionally need docker.sock
+const DOCKER_MANAGER_SERVICE_NAME_RE = /\b(?:localstack|docker|dind|ci|runner|build|agent|registry|portainer|rancher|watchtower)\b/i;
+
+/** Walk backward from line `i` through `lines` to find the service's image
+ *  value and inferred service name, stopping once we reach a dedent that
+ *  indicates a sibling service or the top-level `services:` key. */
+function composeServiceContextAt(lines: string[], i: number): { image: string; serviceName: string } {
+  const mountIndent = (lines[i].match(/^(\s*)/)?.[1].length) ?? 0;
+  let image = "";
+  let serviceName = "";
+  for (let j = i - 1; j >= 0 && j >= i - 40; j--) {
+    const l = lines[j];
+    const indent = (l.match(/^(\s*)/)?.[1].length) ?? 0;
+    // image: localstack/localstack
+    if (!image && /^\s*image\s*:\s*\S/.test(l)) {
+      image = (l.match(/^\s*image\s*:\s*["']?([^\s"'#]+)/) ?? [])[1] ?? "";
+    }
+    // Service name: a non-empty YAML key at indent 2-4 that is a parent of the volume line
+    if (!serviceName && indent < mountIndent - 4 && /^\s+\w[\w-]*\s*:\s*$/.test(l)) {
+      serviceName = (l.match(/^\s+(\w[\w-]*)\s*:/) ?? [])[1] ?? "";
+    }
+    // Once we've found both or hit the services: key, stop
+    if (l.trim() === "services:" || (image && serviceName)) break;
+  }
+  return { image, serviceName };
+}
+
 export function findComposeDockerSocketMount(content: string): ScanIndicator[] {
   if (!isComposeContent(content)) return [];
-  return content.split("\n").flatMap((line, i) => DOCKER_SOCK_RE.test(line) ? [{
-    id: "container-compose-docker-socket-mount", label: "Docker Socket Mounted Into Container", severity: "critical" as const, line: i + 1, confidence: 90,
-    detail: "Mounts the host's Docker socket into the container — this grants the container root-equivalent control over the host (it can launch new privileged containers, read any file via a bind mount, etc). Avoid mounting docker.sock unless this service is a trusted, isolated CI/deployment agent.",
-  }] : []);
+  const lines = content.split("\n");
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!DOCKER_SOCK_RE.test(line)) continue;
+    // Skip commented-out mounts
+    if (/^\s*#/.test(line)) continue;
+    const { image, serviceName } = composeServiceContextAt(lines, i);
+    // Known Docker management tools that legitimately need docker.sock
+    if (DOCKER_MANAGER_IMAGE_RE.test(image) || DOCKER_MANAGER_SERVICE_NAME_RE.test(serviceName)) continue;
+    found.push({
+      id: "container-compose-docker-socket-mount", label: "Docker Socket Mounted Into Container", severity: "critical" as const, line: i + 1, confidence: 90,
+      detail: "Mounts the host's Docker socket into the container — this grants the container root-equivalent control over the host (it can launch new privileged containers, read any file via a bind mount, etc). Avoid mounting docker.sock unless this service is a trusted, isolated CI/deployment agent.",
+    });
+  }
+  return found;
 }
 
 // ── container-compose-host-namespace ─────────────────────────────────────

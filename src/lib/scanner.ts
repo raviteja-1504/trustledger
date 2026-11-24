@@ -1163,7 +1163,7 @@ const CMD_INJECTION_RE = [
   /execSync\s*\(`[^`]*\$\{/,
   /child_process\.exec\s*\(`[^`]*\$\{/,
   /spawn\s*\([^,)]*\$\{[^}]+\}/,
-  /\bexec\s*\(\s*`[^`]*\$\{/,
+  /(?<!\.)\bexec\s*\(\s*`[^`]*\$\{/,
   // Java/Kotlin — Runtime.exec / ProcessBuilder built from concatenated request input
   /Runtime\.getRuntime\s*\(\s*\)\s*\.\s*exec\s*\([^)]*\+\s*request\.getParameter\s*\(/i,
   /new\s+ProcessBuilder\s*\([^)]*request\.getParameter\s*\(/i,
@@ -1656,9 +1656,10 @@ const FILE_UPLOAD_RE = [
 ];
 
 // Race condition: TOCTOU (check then act without atomic guarantee)
-// Detected as: existsSync/access/stat on same path followed by read/write/delete
+// Detected as: existsSync/access/stat on same path followed by read/write/delete.
+// mkdir is excluded: `if (!fs.existsSync(d)) fs.mkdirSync(d)` is idiomatic "create if not exists", not a race.
 const TOCTOU_SOURCE_RE = /\bfs\.(?:existsSync|accessSync|statSync)\s*\(([^)]+)\)/;
-const TOCTOU_SINK_RE   = /\bfs\.(?:readFile|writeFile|unlink|rename|rmdir|mkdir|open|createReadStream|createWriteStream)(?:Sync)?\s*\(/;
+const TOCTOU_SINK_RE   = /\bfs\.(?:readFile|writeFile|unlink|rename|rmdir|open|createReadStream|createWriteStream)(?:Sync)?\s*\(/;
 
 // XSS patterns
 const XSS_RE = [
@@ -1759,14 +1760,13 @@ const WEAK_CRYPTO_RE = [
   /\b(?:KeyGenerator|SecretKeyFactory)\.getInstance\s*\(\s*["'](?:DES|DESede|TripleDES|RC2|RC4|ARCFOUR|Blowfish)["']/i,
   /Digest\s*\(\s*["'](?:MD5|SHA-1|SHA1)["']/i,
   /bcrypt\.(?:hash|hashSync)\s*\([^,]+,\s*[1-9]\s*[,)]/,  // rounds < 10
-  // Go — crypto/md5, crypto/sha1 (broken hashes); crypto/des, crypto/rc4
-  // (broken ciphers). Flat match, no "used for password" context gate --
-  // matches this file's established precedent above (only the Python
-  // hashlib entry is context-gated, and it's the minority pattern here).
-  /\bmd5\.(?:New|Sum)\s*\(/,
-  /\bsha1\.(?:New|Sum)\s*\(/,
+  // Go — crypto/des, crypto/rc4 (broken ciphers); flat match (no context gate needed -- protocol
+  // mandate is rare and DES/RC4 have no legitimate modern use case).
   /\bdes\.(?:NewCipher|NewTripleDESCipher)\s*\(/,
   /\brc4\.NewCipher\s*\(/,
+  // Go — crypto/md5 and crypto/sha1: broken hashes, BUT commonly used as non-security checksums
+  // (ETag, cache key, file dedup). Suppressed when the line contains cache/checksum/fingerprint/etag
+  // context -- see GO_HASH_CACHE_CONTEXT_RE gate in findWeakCrypto.
   // C# — System.Security.Cryptography's MD5/SHA1 factory methods and weak
   // cipher-mode/provider shapes. Flat match, no password-context gate,
   // same posture as the Go entries above.
@@ -2284,9 +2284,25 @@ function findPHPPharDeserialization(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Go md5/sha1 are used as non-security checksums (ETag, cache key, file dedup) often enough that a
+// flat match generates excessive false positives. These keywords in the same line indicate a
+// non-security use; `usedforsecurity` is not a Go concept so we rely on naming context instead.
+const GO_HASH_CACHE_CONTEXT_RE = /\b(?:cache|etag|e_tag|checksum|check_sum|fingerprint|dedup|content_hash|hash_key|cacheKey|hashKey|digest_key|bucket|shard|partition|s3key|object_key|b2key|blob_key)\b/i;
+const GO_WEAK_HASH_RE = /\b(?:md5|sha1)\.(?:New|Sum)\s*\(/;
+
 function findWeakCrypto(lines: string[]): ScanIndicator[] {
-  return runDetector(lines, WEAK_CRYPTO_RE, "weak-crypto", "Weak Cryptography", "high",
+  const found = runDetector(lines, WEAK_CRYPTO_RE, "weak-crypto", "Weak Cryptography", "high",
     "MD5/SHA1/DES/ECB — broken algorithms or insufficient bcrypt rounds; use SHA-256+/AES-CBC/bcrypt≥12");
+  // Go md5/sha1: suppress when the line (or the two surrounding lines) indicates a non-security checksum use.
+  for (let i = 0; i < lines.length; i++) {
+    if (!GO_WEAK_HASH_RE.test(lines[i])) continue;
+    const ctx = lines.slice(Math.max(0, i - 1), i + 2).join(" ");
+    if (GO_HASH_CACHE_CONTEXT_RE.test(ctx)) continue;
+    if (found.some(f => f.line === i + 1)) continue; // already flagged by WEAK_CRYPTO_RE (password context)
+    found.push({ id: "weak-crypto", label: "Weak Cryptographic Hash", severity: "medium", line: i + 1,
+      detail: "MD5/SHA-1 are collision-broken — use SHA-256 or stronger; for a non-security checksum annotate the call site with a cache/checksum variable name so the scanner can distinguish it" });
+  }
+  return found;
 }
 
 function findPIIInLogs(lines: string[]): ScanIndicator[] {
@@ -3804,6 +3820,23 @@ const PHP_FAST_PASSWORD_HASH_RE = /\bhash\s*\(\s*["'](?:sha\d+(?:\/\d+)?|sha3-\d
 // (the arguments before the method may hold one level of parentheses: `openssl_encrypt($req->param('d'), 'DES-CBC', ...)`)
 const PHP_WEAK_CIPHER_RE = /\bopenssl_(?:encrypt|decrypt)\s*\((?:[^()]|\([^()]*\))*?["'](?:[\w-]*-ecb|des(?:-[\w-]+)?|des-ede3?(?:-[\w-]+)?|rc2(?:-[\w-]+)?|rc4(?:-[\w-]+)?|bf(?:-[\w-]+)?|blowfish)["']|\bmcrypt_(?:encrypt|decrypt|module_open)\s*\(|\bMCRYPT_(?:DES|3DES|RC2|BLOWFISH|MODE_ECB)\b/i;
 
+// Keywords that, when found in a comment near the CBC call, indicate the cipher mode
+// is dictated by an external protocol or compatibility requirement (not a free choice).
+const CBC_PROTOCOL_MANDATE_RE = /\b(?:legacy|compat|migrat|pkcs|pbes|interop|partner|payment|gateway|mandate|required\s+by|rfc\s*\d+|fips|backcompat|backward|cipher.?suite)\b/i;
+
+/** True when a comment in the 3 lines before (or on) the CBC/CFB/OFB call documents a
+ *  protocol mandate, so the developer cannot simply switch to GCM. Covers whole-line
+ *  comments (`# ...`, `// ...`) and inline trailing comments on any line. */
+function cbcIsProtocolMandated(lines: string[], i: number): boolean {
+  for (let j = Math.max(0, i - 3); j <= i; j++) {
+    const t = lines[j];
+    if (/^\s*[#/]/.test(t) && CBC_PROTOCOL_MANDATE_RE.test(t)) return true;
+    const afterComment = (/(?:\/\/|#)(.*)/.exec(t) ?? [])[1] ?? "";
+    if (afterComment && CBC_PROTOCOL_MANDATE_RE.test(afterComment)) return true;
+  }
+  return false;
+}
+
 function findWeakCryptoPHP(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
   // encrypt-then-MAC (or libsodium's authenticated boxes) somewhere in the file
@@ -3821,7 +3854,7 @@ function findWeakCryptoPHP(lines: string[]): ScanIndicator[] {
     } else if (PHP_FAST_PASSWORD_HASH_RE.test(line)) {
       found.push({ id: "weak-crypto", label: "Fast Hash for a Password", severity: "high", line: i + 1,
         detail: "A fast general-purpose hash over a password (even salted) can be brute-forced at billions of guesses per second -- use password_hash() / password_verify()" });
-    } else if (PHP_UNAUTHENTICATED_MODE_RE.test(line) && !authenticated) {
+    } else if (PHP_UNAUTHENTICATED_MODE_RE.test(line) && !authenticated && !cbcIsProtocolMandated(lines, i)) {
       found.push({ id: "weak-crypto", label: "Unauthenticated Encryption", severity: "medium", line: i + 1,
         detail: "CBC/CTR/CFB/OFB encryption with no MAC anywhere in this file -- the ciphertext can be altered undetected (CBC padding errors become a decryption oracle); use AES-256-GCM, or encrypt-then-hash_hmac" });
     } else if (fixedIvPHP(line, lines, i)) {
@@ -3922,7 +3955,7 @@ function findWeakCryptoRuby(lines: string[]): ScanIndicator[] {
         detail: "The cipher's IV / nonce is a literal -- every message is encrypted the same way (and a repeated GCM nonce leaks the authentication key); use cipher.random_iv" });
       continue;
     }
-    if (!isNonExecutableLine(lines[i]) && !authenticated && RB_UNAUTHENTICATED_MODE_RE.test(lines[i])) {
+    if (!isNonExecutableLine(lines[i]) && !authenticated && RB_UNAUTHENTICATED_MODE_RE.test(lines[i]) && !cbcIsProtocolMandated(lines, i)) {
       found.push({ id: "weak-crypto", label: "Unauthenticated Encryption", severity: "medium", line: i + 1,
         detail: "CBC/CTR/CFB/OFB encryption with no MAC anywhere in this file -- the ciphertext can be altered undetected (CBC padding errors become a decryption oracle); use aes-256-gcm, or encrypt-then-OpenSSL::HMAC" });
       continue;
@@ -4848,17 +4881,25 @@ function findInsecureFileUploadJava(lines: string[]): ScanIndicator[] {
   return found;
 }
 
-// TOCTOU: check-then-act race (existsSync/statSync followed by fs operation within 10 lines)
+// TOCTOU: check-then-act race (existsSync/statSync followed by fs operation within 10 lines on the SAME path).
+// Requiring the same path variable prevents false positives where unrelated file ops happen near a stat call.
 function findTOCTOU(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
   const seen = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
-    if (seen.has(i) || !TOCTOU_SOURCE_RE.test(lines[i])) continue;
+    if (seen.has(i)) continue;
+    const srcM = TOCTOU_SOURCE_RE.exec(lines[i]);
+    if (!srcM) continue;
+    // Extract the first identifier (variable or simple path expression) from the check argument.
+    const pathArg = srcM[1].trim();
+    const pathId = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/.exec(pathArg)?.[0];
+    if (!pathId) continue;
+    const samePathRe = new RegExp(`\\b${pathId.replace(/\./g, "\\.")}\\b`);
     for (let j = i + 1; j < Math.min(lines.length, i + 10); j++) {
-      if (TOCTOU_SINK_RE.test(lines[j])) {
+      if (TOCTOU_SINK_RE.test(lines[j]) && samePathRe.test(lines[j])) {
         seen.add(i);
         found.push({ id:"toctou", label:"TOCTOU Race Condition", severity:"medium", line:i+1,
-          detail:"File existence check followed by file operation — attacker can swap file in the window" });
+          detail:"File existence check followed by file operation on the same path — attacker can swap file in the window" });
         break;
       }
     }

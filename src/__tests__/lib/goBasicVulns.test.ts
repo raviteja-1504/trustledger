@@ -70,6 +70,14 @@ describe("weak cipher use", () => {
     expect(enc(["crypto/rand", "io"], `\tblock, _ := aes.NewCipher(key)\n\tiv := ct[:16]\n\tio.ReadFull(rand.Reader, iv)\n\tcipher.NewCTR(block, iv).XORKeyStream(ct[16:], p)`)).toContain("weak-crypto");
     expect(enc([], `\tkey := []byte(r.FormValue("k"))\n\tfor i := range data {\n\t\tdata[i] ^= key[i%len(key)]\n\t}`)).toContain("weak-crypto");
   });
+  it("CBC in a function named for a protocol/legacy context is not flagged; in a generic function it still is", () => {
+    // migrateLegacyData: protocol-mandated CBC (reading old CBC-encrypted records); no HMAC needed to suppress
+    const legacyFn = `package main\nimport (\n\t"crypto/aes"\n\t"crypto/cipher"\n)\nfunc migrateLegacyData(key, ct []byte) []byte {\n\tblock, _ := aes.NewCipher(key)\n\tiv := ct[:aes.BlockSize]\n\tout := make([]byte, len(ct)-aes.BlockSize)\n\tcipher.NewCBCDecrypter(block, iv).CryptBlocks(out, ct[aes.BlockSize:])\n\treturn out\n}\n`;
+    expect(ids(legacyFn)).not.toContain("weak-crypto");
+    // Generic function name: CBC without HMAC IS still flagged
+    const genericFn = `package main\nimport (\n\t"crypto/aes"\n\t"crypto/cipher"\n)\nfunc encrypt(key, p []byte) []byte {\n\tblock, _ := aes.NewCipher(key)\n\tiv := make([]byte, aes.BlockSize)\n\tout := make([]byte, len(p))\n\tcipher.NewCBCEncrypter(block, iv).CryptBlocks(out, p)\n\treturn out\n}\n`;
+    expect(ids(genericFn)).toContain("weak-crypto");
+  });
   it("AES-GCM with a random nonce, or a random IV with an HMAC over the ciphertext, is not", () => {
     expect(enc(["crypto/rand", "io"], `\tblock, _ := aes.NewCipher(key)\n\tgcm, _ := cipher.NewGCM(block)\n\tnonce := make([]byte, gcm.NonceSize())\n\tio.ReadFull(rand.Reader, nonce)\n\tct := gcm.Seal(nil, nonce, p, nil)\n\t_ = ct`)).not.toContain("weak-crypto");
     expect(enc(["crypto/rand", "crypto/hmac", "io"], `\tblock, _ := aes.NewCipher(key)\n\tiv := ct[:16]\n\tio.ReadFull(rand.Reader, iv)\n\tcipher.NewCBCEncrypter(block, iv).CryptBlocks(ct[16:], p)\n\tmac := hmac.New(sha256.New, macKey)\n\t_ = mac`)).not.toContain("weak-crypto");

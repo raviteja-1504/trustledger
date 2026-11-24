@@ -40,6 +40,14 @@ describe("PHP weak cipher use", () => {
     expect(weak(fn(`${cbc}\n    $mac = hash_hmac('sha256', $iv . $enc, $macKey);`))).toBe(false);
     expect(weak(fn(`    $iv = random_bytes(12);\n    $enc = openssl_encrypt($data, 'aes-256-gcm', $key, 0, $iv, $tag);`))).toBe(false);
   });
+  it("CBC with a protocol-mandate comment is not flagged; without the comment it still is", () => {
+    // Payment gateway / partner integration where the protocol spec mandates AES-CBC
+    const withComment = `    $iv = random_bytes(16);\n    // Required by payment gateway API: partner mandated AES-128-CBC\n    $enc = openssl_encrypt($data, 'aes-256-cbc', $key, 0, $iv);`;
+    expect(weak(fn(withComment))).toBe(false);
+    // Legacy compat: same code without the comment is still flagged
+    const noComment = `    $iv = random_bytes(16);\n    $enc = openssl_encrypt($data, 'aes-256-cbc', $key, 0, $iv);`;
+    expect(weak(fn(noComment))).toBe(true);
+  });
   it("a fixed, empty or zero IV, inline or assigned first", () => {
     const withMac = "\n    $mac = hash_hmac('sha256', $enc, $macKey);";
     expect(weak(fn(`    $iv = str_repeat("\\0", 16);\n    $enc = openssl_encrypt($data, 'aes-256-cbc', $key, 0, $iv);${withMac}`))).toBe(true);

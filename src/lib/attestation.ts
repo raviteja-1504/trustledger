@@ -14,6 +14,14 @@ import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { blockingRisks, countOpenBlocking, loadGate } from "@/lib/mergeGate";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { attestPermissionFor, type Permissions } from "@/lib/permissions";
+import {
+  ensureSigningKey,
+  buildFindingsDigest,
+  buildPolicyVersion,
+  signCanonicalPayload,
+  PAYLOAD_SCHEMA_VERSION,
+  type CanonicalAttestationPayload,
+} from "@/lib/attestationSigning";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Db = SupabaseClient<any>;
@@ -30,7 +38,7 @@ export interface AttestParams {
 }
 
 export type AttestOutcome =
-  | { ok: true; attestation_id: string; payload_hash: string; attested_at: string }
+  | { ok: true; attestation_id: string; payload_hash: string; attested_at: string; signed: boolean }
   | { ok: false; reason: "scan_not_found" | "insert_failed"; detail?: unknown }
   | { ok: false; reason: "forbidden"; risk_score: string };
 
@@ -101,12 +109,15 @@ export async function performAttestation(db: Db, params: AttestParams, opts: { d
   const { org_id, user_id, scan_id, file_path, reviewer_email, reviewer_github, permissions } = params;
   const now = new Date().toISOString();
 
-  // Independent reads, at once: the scan, the file, an existing sign-off, and the org's merge gate.
-  const [{ data: scan }, { data: file }, { data: existing }, gate] = await Promise.all([
-    db.from("scans").select("id, repo_full_name, overall_risk, check_run_id, installation_id").eq("id", scan_id).eq("org_id", org_id).single(),
-    db.from("scan_files").select("risk_score, content_hash").eq("scan_id", scan_id).eq("file_path", file_path).single(),
+  // Independent reads in parallel: scan (now includes commit_sha), the file (now includes
+  // indicators for the findings digest), an existing sign-off, the org's merge gate, and
+  // the platform signing key (null when ATTESTATION_SIGNING_KEY env var is unset).
+  const [{ data: scan }, { data: file }, { data: existing }, gate, signingKey] = await Promise.all([
+    db.from("scans").select("id, repo_full_name, overall_risk, commit_sha, check_run_id, installation_id").eq("id", scan_id).eq("org_id", org_id).single(),
+    db.from("scan_files").select("risk_score, content_hash, indicators").eq("scan_id", scan_id).eq("file_path", file_path).single(),
     db.from("attestations").select("id, created_at").eq("scan_id", scan_id).eq("file_path", file_path).maybeSingle(),
     loadGate(db, org_id),
+    ensureSigningKey(db),
   ]);
 
   if (!scan) return { ok: false, reason: "scan_not_found" };
@@ -117,6 +128,39 @@ export async function performAttestation(db: Db, params: AttestParams, opts: { d
   if (!permissions[attestPermissionFor(risk)]) return { ok: false, reason: "forbidden", risk_score: risk };
 
   const payloadHash = buildAttestationHash(scan_id, file_path, reviewer_email, now);
+
+  // Build the canonical payload and Ed25519 signature when a signing key is available.
+  // Falls back to hash-only mode (payload_json / signature / signing_key_id all null) when
+  // ATTESTATION_SIGNING_KEY is unset — preserving backward compatibility with existing records.
+  let payloadJson:  CanonicalAttestationPayload | null = null;
+  let signature:    string | null = null;
+  let signingKeyId: string | null = null;
+
+  if (signingKey && scan) {
+    const payload: CanonicalAttestationPayload = {
+      schema_version:  PAYLOAD_SCHEMA_VERSION,
+      reviewer_email,
+      reviewer_id:     user_id ?? null,
+      org_id,
+      repo:            (scan as { repo_full_name: string }).repo_full_name,
+      commit_sha:      (scan as { commit_sha?: string | null }).commit_sha ?? "",
+      file_path,
+      content_hash:    (file as { content_hash?: string | null } | null)?.content_hash ?? null,
+      scan_id,
+      findings_digest: buildFindingsDigest(
+        Array.isArray((file as { indicators?: unknown } | null)?.indicators)
+          ? (file as { indicators: unknown[] }).indicators
+          : [],
+      ),
+      decision:        "attested",
+      policy_version:  buildPolicyVersion(gate),
+      timestamp:       now,
+      key_id:          signingKey.id,
+    };
+    signature    = signCanonicalPayload(payload, signingKey.privateKeyPem);
+    payloadJson  = payload;
+    signingKeyId = signingKey.id;
+  }
 
   // The attestations table has a PostgreSQL rule that blocks any INSERT with
   // an ON CONFLICT clause (Supabase's .upsert() uses this internally). Use a
@@ -138,6 +182,9 @@ export async function performAttestation(db: Db, params: AttestParams, opts: { d
         reviewer_email,
         reviewer_github: reviewer_github ?? null,
         payload_hash:    payloadHash,
+        payload_json:    payloadJson,
+        signature,
+        signing_key_id:  signingKeyId,
       })
       .select("id, created_at")
       .single();
@@ -255,5 +302,5 @@ export async function performAttestation(db: Db, params: AttestParams, opts: { d
     else await syncAutoIncidents(db, org_id);
   }
 
-  return { ok: true, attestation_id: attestation.id, payload_hash: payloadHash, attested_at: attestation.created_at };
+  return { ok: true, attestation_id: attestation.id, payload_hash: payloadHash, attested_at: attestation.created_at, signed: !!signature };
 }
