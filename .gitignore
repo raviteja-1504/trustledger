@@ -58,3 +58,6 @@ Thumbs.db
 .deploy-tmp
 
 .vercel
+
+# timestamped output of securityBenchmarkRegression.test.ts (one file per run); keep reports in CI artefacts
+src/__tests__/benchmarks/securityBenchmark/reports/
