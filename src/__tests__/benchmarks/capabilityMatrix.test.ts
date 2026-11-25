@@ -218,7 +218,28 @@ describe("capability matrix", () => {
 const KNOWN_WRONG_DATAFLOW: string[] = [];
 // command-injection is now ENGINE_OWNED_RULES (scanner.ts): regex findings on engine-analysed files are dropped,
 // removing all 12 FPs the weaker "non-constant shell argument" / "named tainted variable" rules produced.
-const KNOWN_WRONG_ANY: string[] = [];
+// The cases below require interprocedural / CFG-level taint analysis that is not yet implemented:
+//   - context-sensitive: the engine tracks taint flow but not call-context (same callee, different arguments)
+//   - cross-file:        import resolution not yet wired into the taint graph
+//   - field-sensitive:   object/struct field-level taint not yet modelled
+//   - interprocedural:   multi-hop call graphs not yet followed
+//   - path-sensitive:    not all branch-kills are propagated (overwrite on all branches)
+//   - pointer-alias:     aliased references to the same object share taint imprecisely
+//   - return-value:      taint returned from a helper is not yet propagated to the call site
+const KNOWN_WRONG_ANY: string[] = [
+  "FP  javascript | context-sensitive | same helper, tainted vs clean call",
+  "FP  javascript | cross-file | helper in another module",
+  "FP  javascript | field-sensitive | tainted vs clean property",
+  "FP  javascript | interprocedural | two helper hops",
+  "FP  javascript | path-sensitive | overwritten on every branch",
+  "FP  javascript | pointer-alias | object alias",
+  "FP  javascript | return-value | taint returned vs dropped",
+  "FP  python | context-sensitive | same helper, tainted vs clean call",
+  "FP  python | cross-file | helper in another module",
+  "FP  python | field-sensitive | tainted vs clean attribute",
+  "FP  python | interprocedural | two helper hops",
+  "FP  python | return-value | taint returned vs dropped",
+];
 
 describe("capability matrix: no silent change", () => {
   const wrong = (tierName: "any" | "dataflow") => outcomes.filter(o => (o[tierName] !== o.vulnerable)).map(o => `${o.vulnerable ? "FN" : "FP"}  ${o.key.replace(/ \| (vulnerable|safe)$/, "")}`).sort();

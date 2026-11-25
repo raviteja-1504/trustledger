@@ -1965,6 +1965,23 @@ function hasInfraSecretRules(file_path: string, lines: readonly string[]): boole
     || /"\$schema"\s*:\s*"[^"]*deploymentTemplate/i.test(head);                // ARM
 }
 
+/**
+ * Fold adjacent string-literal concatenations on a single line so secret-pattern regexes
+ * can match values that have been split to bypass push-protection scanners:
+ *   "sk_live_" + "abc123..."  →  "sk_live_abc123..."
+ * Only handles simple, non-escaped adjacent literals; iterates until stable.
+ */
+function foldAdjacentStrings(line: string): string {
+  let prev = "";
+  let s = line;
+  while (s !== prev) {
+    prev = s;
+    s = s.replace(/"([^"\\]*)"\s*\+\s*"([^"\\]*)"/g, '"$1$2"');
+    s = s.replace(/'([^'\\]*)'\s*\+\s*'([^'\\]*)'/g, "'$1$2'");
+  }
+  return s;
+}
+
 function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
   if (DEMO_DATA_FILE_RE.test(file_path)) return [];
   const isTestFile = TEST_FILE_RE.test(file_path);
@@ -1980,7 +1997,11 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
       // A provider-format token is a leak wherever it sits: pasted into a comment, a TODO, a README. Only the generic
       // word=value patterns read code alone (a comment saying "password = ..." describes, it does not set).
       if (isNonExecutableLine(lines[i]) && !(branded && isCommentLine(lines[i]))) continue;
-      const m = re.exec(lines[i]);
+      // Fold adjacent string concatenations ("a"+"b" → "ab") so split secrets are detected.
+      // Only branded/structural patterns benefit; for position-sensitive checks below we still
+      // pass the original line to avoid index mismatches.
+      const scanLine = branded ? foldAdjacentStrings(lines[i]) : lines[i];
+      const m = re.exec(scanLine);
       if (!m) continue;
       // A provider-format token is the secret by its shape: only a placeholder INSIDE its own quoted value counts, not
       // an unrelated quoted word elsewhere on the line (`require('stripe')('sk_live_...')` is a leaked key; 'stripe'
