@@ -21,9 +21,13 @@ import {
   buildFindingsDigest,
   buildPolicyVersion,
   verifyAttestation,
+  validatePayloadSchema,
+  checkPayloadDbBinding,
   ensureSigningKey,
   PAYLOAD_SCHEMA_VERSION,
   type CanonicalAttestationPayload,
+  type AttestationBindingRow,
+  type ScanBindingRow,
 } from "@/lib/attestationSigning";
 import { checkAuditChain, auditEntryHash, type ChainRow } from "@/lib/audit";
 
@@ -214,6 +218,146 @@ test("F10: ensureSigningKey returns null for an invalid PEM string", async () =>
     if (original !== undefined) process.env.ATTESTATION_SIGNING_KEY = original;
     else delete process.env.ATTESTATION_SIGNING_KEY;
   }
+});
+
+// ── F10b: Retired key must not sign new attestations ─────────────────────────
+
+test("F10b: ensureSigningKey returns null when the key's DB row is retired", async () => {
+  const { privateKeyPem, publicKeyPem } = generateSigningKeyPair();
+
+  // DB returns the key but with status = "retired"
+  const db = {
+    from: (table: string) => ({
+      select: () => ({
+        is: () => ({
+          eq: (_col: string, _val: string) => ({
+            maybeSingle: () => Promise.resolve({
+              data: table === "signing_keys" ? { id: "key-retired-1", status: "retired" } : null,
+            }),
+          }),
+        }),
+        eq: (_col: string, _val: string) => ({
+          maybeSingle: () => Promise.resolve({
+            data: table === "signing_keys" ? { id: "key-retired-1", status: "retired" } : null,
+          }),
+          single: () => Promise.resolve({ data: null }),
+        }),
+      }),
+      insert: () => ({ select: () => ({ single: () => Promise.resolve({ data: null }) }) }),
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+
+  const original = process.env.ATTESTATION_SIGNING_KEY;
+  process.env.ATTESTATION_SIGNING_KEY = privateKeyPem;
+  try {
+    // Even though the env var is set, the key's row is retired — must not sign.
+    const result = await ensureSigningKey(db);
+    expect(result).toBeNull();
+    void publicKeyPem; // silence unused warning
+  } finally {
+    if (original !== undefined) process.env.ATTESTATION_SIGNING_KEY = original;
+    else delete process.env.ATTESTATION_SIGNING_KEY;
+  }
+});
+
+// ── DB field manipulation (payload_db_mismatch) ───────────────────────────────
+
+function makeAttRow(overrides: Partial<AttestationBindingRow> = {}): AttestationBindingRow {
+  return {
+    scan_id:        "scan-uuid-1",
+    file_path:      "src/auth/login.ts",
+    reviewer_email: "alice@example.com",
+    signing_key_id: "key-uuid-1",
+    ...overrides,
+  };
+}
+
+function makeScanRow(overrides: Partial<ScanBindingRow> = {}): ScanBindingRow {
+  return {
+    repo_full_name: "acme/backend",
+    commit_sha:     "a".repeat(40),
+    ...overrides,
+  };
+}
+
+test("DB-binding: matching payload and DB row returns ok", () => {
+  const payload = makePayload();
+  expect(checkPayloadDbBinding(payload, makeAttRow(), "org-uuid-1", makeScanRow())).toBe("ok");
+});
+
+test("DB-binding: swapped scan_id returns payload_db_mismatch", () => {
+  const payload = makePayload({ scan_id: "scan-uuid-1" });
+  const att = makeAttRow({ scan_id: "scan-uuid-DIFFERENT" });
+  expect(checkPayloadDbBinding(payload, att, "org-uuid-1", makeScanRow())).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: swapped file_path returns payload_db_mismatch", () => {
+  const payload = makePayload({ file_path: "src/auth/login.ts" });
+  const att = makeAttRow({ file_path: "src/evil/backdoor.ts" });
+  expect(checkPayloadDbBinding(payload, att, "org-uuid-1", makeScanRow())).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: wrong org_id returns payload_db_mismatch", () => {
+  const payload = makePayload({ org_id: "org-uuid-1" });
+  expect(checkPayloadDbBinding(payload, makeAttRow(), "org-uuid-ATTACKER", makeScanRow())).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: tampered reviewer_email returns payload_db_mismatch", () => {
+  const payload = makePayload({ reviewer_email: "alice@example.com" });
+  const att = makeAttRow({ reviewer_email: "eve@attacker.com" });
+  expect(checkPayloadDbBinding(payload, att, "org-uuid-1", makeScanRow())).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: wrong signing key ID returns payload_db_mismatch", () => {
+  const payload = makePayload({ key_id: "key-uuid-1" });
+  const att = makeAttRow({ signing_key_id: "key-uuid-DIFFERENT" });
+  expect(checkPayloadDbBinding(payload, att, "org-uuid-1", makeScanRow())).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: wrong repo in scan row returns payload_db_mismatch", () => {
+  const payload = makePayload({ repo: "acme/backend" });
+  const scan = makeScanRow({ repo_full_name: "acme/frontend" });
+  expect(checkPayloadDbBinding(payload, makeAttRow(), "org-uuid-1", scan)).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: wrong commit SHA in scan row returns payload_db_mismatch", () => {
+  const payload = makePayload({ commit_sha: "a".repeat(40) });
+  const scan = makeScanRow({ commit_sha: "b".repeat(40) });
+  expect(checkPayloadDbBinding(payload, makeAttRow(), "org-uuid-1", scan)).toBe("payload_db_mismatch");
+});
+
+test("DB-binding: scan row absent (pre-migration row with null commit_sha) — payload empty string matches null", () => {
+  const payload = makePayload({ commit_sha: "" });
+  const scan = makeScanRow({ commit_sha: null });
+  expect(checkPayloadDbBinding(payload, makeAttRow(), "org-uuid-1", scan)).toBe("ok");
+});
+
+// ── Payload schema validation ─────────────────────────────────────────────────
+
+test("validatePayloadSchema: valid payload returns true", () => {
+  expect(validatePayloadSchema(makePayload())).toBe(true);
+});
+
+test("validatePayloadSchema: null returns false", () => {
+  expect(validatePayloadSchema(null)).toBe(false);
+});
+
+test("validatePayloadSchema: missing required field returns false", () => {
+  const { scan_id: _removed, ...partial } = makePayload();
+  expect(validatePayloadSchema(partial)).toBe(false);
+});
+
+test("validatePayloadSchema: wrong schema_version returns false", () => {
+  expect(validatePayloadSchema({ ...makePayload(), schema_version: 99 })).toBe(false);
+});
+
+test("validatePayloadSchema: wrong decision returns false", () => {
+  expect(validatePayloadSchema({ ...makePayload(), decision: "rejected" })).toBe(false);
+});
+
+test("validatePayloadSchema: empty string on required field returns false", () => {
+  expect(validatePayloadSchema({ ...makePayload(), org_id: "" })).toBe(false);
 });
 
 // ── Additional: Deterministic serialization ───────────────────────────────────

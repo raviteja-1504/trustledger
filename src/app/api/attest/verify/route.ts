@@ -23,7 +23,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
-import { verifyAttestation, type CanonicalAttestationPayload } from "@/lib/attestationSigning";
+import {
+  verifyAttestation,
+  validatePayloadSchema,
+  checkPayloadDbBinding,
+  type CanonicalAttestationPayload,
+} from "@/lib/attestationSigning";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -43,11 +48,53 @@ export async function GET(req: NextRequest) {
 
   if (!att) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const { result } = await verifyAttestation(db, {
-    signature:      (att as { signature: string | null }).signature,
-    signing_key_id: (att as { signing_key_id: string | null }).signing_key_id,
-    payload_json:   (att as { payload_json: CanonicalAttestationPayload | null }).payload_json,
+  const attTyped = att as {
+    signature:      string | null;
+    signing_key_id: string | null;
+    payload_json:   CanonicalAttestationPayload | null;
+  };
+
+  const { result: cryptoResult } = await verifyAttestation(db, {
+    signature:      attTyped.signature,
+    signing_key_id: attTyped.signing_key_id,
+    payload_json:   attTyped.payload_json,
   });
+
+  // For records with a valid (or key_retired) cryptographic signature, additionally
+  // verify that every signed payload field matches the corresponding database column.
+  // A valid signature only proves the payload was not altered after signing; it does
+  // not prove the payload actually describes THIS attestation row — an attacker with
+  // DB write access could substitute a legitimately-signed payload from a different record.
+  let verifyResult = cryptoResult;
+  if (cryptoResult === "valid" || cryptoResult === "key_retired") {
+    const payload = attTyped.payload_json!;
+
+    if (!validatePayloadSchema(payload)) {
+      verifyResult = "payload_schema_invalid";
+    } else {
+      // Load the scan to verify repo and commit_sha (fields not stored on the attestation row).
+      const { data: scan } = await db
+        .from("scans")
+        .select("repo_full_name, commit_sha")
+        .eq("id", att.scan_id)
+        .eq("org_id", auth.org_id)
+        .maybeSingle();
+
+      const binding = checkPayloadDbBinding(
+        payload,
+        {
+          scan_id:        att.scan_id,
+          file_path:      att.file_path,
+          reviewer_email: att.reviewer_email,
+          signing_key_id: attTyped.signing_key_id,
+        },
+        auth.org_id,
+        scan ? { repo_full_name: scan.repo_full_name as string, commit_sha: scan.commit_sha as string | null } : undefined,
+      );
+
+      if (binding !== "ok") verifyResult = "payload_db_mismatch";
+    }
+  }
 
   return NextResponse.json({
     id:             att.id,
@@ -56,7 +103,7 @@ export async function GET(req: NextRequest) {
     reviewer_email: att.reviewer_email,
     created_at:     att.created_at,
     payload_hash:   att.payload_hash,
-    has_signature:  !!(att as { signature: string | null }).signature,
-    verify_result:  result,
+    has_signature:  !!attTyped.signature,
+    verify_result:  verifyResult,
   });
 }

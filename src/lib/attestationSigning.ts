@@ -189,19 +189,95 @@ export async function ensureSigningKey(
     }
   }
 
-  if (!key || key.status === "revoked") return null;
+  // Retired keys must not sign new attestations (they remain verifiable for historical records,
+  // but only the currently-configured key — marked active — may produce new signatures).
+  if (!key || key.status === "revoked" || key.status === "retired") return null;
   return { id: key.id, privateKeyPem };
 }
 
 // ── Verification (spec D) ─────────────────────────────────────────────────────
 
 export type VerifyResult =
-  | "valid"       // signature checks out against the stored public key
-  | "no_signature"  // pre-signing attestation (payload_json or signature is null)
-  | "invalid"     // signature present but cryptographically invalid
-  | "key_not_found" // signing_key_id references a row that no longer exists
-  | "key_revoked"   // key was explicitly revoked (spec C: revocation)
-  | "key_retired";  // key was retired (historical attestations still valid: "key_retired" ≠ invalid)
+  | "valid"                 // signature OK and payload matches DB record
+  | "no_signature"          // pre-signing attestation (payload_json or signature is null)
+  | "invalid"               // signature present but cryptographically invalid
+  | "key_not_found"         // signing_key_id references a row that no longer exists
+  | "key_revoked"           // key was explicitly revoked (spec C: revocation)
+  | "key_retired"           // key was retired (historical attestations still valid: "key_retired" ≠ invalid)
+  | "payload_db_mismatch"   // signature OK but payload fields disagree with the DB record
+  | "payload_schema_invalid"; // payload_json is missing required fields or has wrong types
+
+// ── Payload schema validation ─────────────────────────────────────────────────
+
+/**
+ * Returns true when payload_json has all required fields with correct types.
+ * A missing or wrongly-typed field indicates schema drift or tampering.
+ */
+export function validatePayloadSchema(p: unknown): p is CanonicalAttestationPayload {
+  if (!p || typeof p !== "object") return false;
+  const o = p as Record<string, unknown>;
+  return (
+    o.schema_version === PAYLOAD_SCHEMA_VERSION &&
+    typeof o.reviewer_email  === "string" && o.reviewer_email.length > 0 &&
+    (o.reviewer_id === null || typeof o.reviewer_id === "string") &&
+    typeof o.org_id          === "string" && o.org_id.length > 0 &&
+    typeof o.repo            === "string" && o.repo.length > 0 &&
+    typeof o.commit_sha      === "string" && o.commit_sha.length > 0 &&
+    typeof o.file_path       === "string" && o.file_path.length > 0 &&
+    (o.content_hash === null || typeof o.content_hash === "string") &&
+    typeof o.scan_id         === "string" && o.scan_id.length > 0 &&
+    typeof o.findings_digest === "string" && o.findings_digest.length > 0 &&
+    o.decision === "attested" &&
+    typeof o.policy_version  === "string" && o.policy_version.length > 0 &&
+    typeof o.timestamp       === "string" && o.timestamp.length > 0 &&
+    typeof o.key_id          === "string" && o.key_id.length > 0
+  );
+}
+
+// ── DB binding check ─────────────────────────────────────────────────────────
+
+export interface AttestationBindingRow {
+  scan_id:        string;
+  file_path:      string;
+  reviewer_email: string;
+  signing_key_id: string | null;
+}
+
+export interface ScanBindingRow {
+  repo_full_name: string;
+  commit_sha:     string | null;
+}
+
+/**
+ * Cross-checks every signed payload field against the corresponding DB columns.
+ * A cryptographically valid signature only proves the payload was not tampered with;
+ * this check proves the payload actually describes this attestation row, not a different one.
+ *
+ * Returns "payload_db_mismatch" if any field disagrees.
+ */
+export function checkPayloadDbBinding(
+  payload:   CanonicalAttestationPayload,
+  att:       AttestationBindingRow,
+  authOrgId: string,
+  scan?:     ScanBindingRow,
+): "ok" | "payload_db_mismatch" {
+  if (
+    payload.org_id          !== authOrgId       ||
+    payload.scan_id         !== att.scan_id     ||
+    payload.file_path       !== att.file_path   ||
+    payload.reviewer_email  !== att.reviewer_email ||
+    payload.key_id          !== att.signing_key_id
+  ) return "payload_db_mismatch";
+
+  if (scan) {
+    if (payload.repo !== scan.repo_full_name) return "payload_db_mismatch";
+    // commit_sha: compare against scan record; treat null as empty string (pre-migration rows).
+    const dbCommit = scan.commit_sha ?? "";
+    if (payload.commit_sha !== dbCommit) return "payload_db_mismatch";
+  }
+
+  return "ok";
+}
 
 /**
  * Look up the signing key and cryptographically verify an attestation's signature (spec D).
