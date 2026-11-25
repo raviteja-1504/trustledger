@@ -212,6 +212,83 @@ describe("ControlGaps", () => {
   });
 });
 
+describe("ControlGaps: controls I own", () => {
+  const clean = (control_id: string, owner: string | null, over: Record<string, unknown> = {}) =>
+    control({ control_id, control_name: `Control ${control_id}`, owner, status: "satisfied", gaps: [], remediations: [], flags: [], ...over });
+  const three = () => report([
+    control({ control_id: "CC8.1", owner: "ana@acme.dev" }),          // has gaps and an overdue item
+    clean("CC7.1", "ANA@acme.dev"),                                  // owned, nothing outstanding (different capitals)
+    clean("CC6.1", "bo@acme.dev", { gaps: [{ evidence_type: "pr_approval", kind: "missing" }] }),
+  ]);
+  const articles = () => screen.getAllByRole("article").map(a => a.getAttribute("aria-label"));
+  const open = (email: string | null | undefined, resp: unknown = three()) => { handler = () => resp; return gapsPanel({ currentEmail: email }); };
+
+  it("points out how many controls you own and how many need attention, matching your email in any capitals", async () => {
+    open("Ana@Acme.dev");
+    const mine = await screen.findByRole("region", { name: "Your controls" });
+    expect(mine).toHaveTextContent("You own 2 controls: 1 needs attention (evidence gaps or overdue remediation).");
+  });
+
+  it("says so when none of your controls needs attention", async () => {
+    open("ana@acme.dev", report([clean("CC8.1", "ana@acme.dev"), clean("CC6.1", "bo@acme.dev")]));
+    expect(await screen.findByRole("region", { name: "Your controls" })).toHaveTextContent("You own 1 control, and none has evidence gaps or overdue remediation.");
+  });
+
+  it("an overdue remediation counts as needing attention even with no evidence gap", async () => {
+    open("ana@acme.dev", report([clean("CC8.1", "ana@acme.dev", { flags: ["remediation_overdue"] })]));
+    expect(await screen.findByRole("region", { name: "Your controls" })).toHaveTextContent("1 needs attention");
+  });
+
+  it("the toggle narrows the list to your controls and back, without touching the organisation-wide summary", async () => {
+    open("ana@acme.dev");
+    await screen.findByRole("region", { name: "Your controls" });
+    expect(articles()).toEqual(["Control CC8.1", "Control CC7.1", "Control CC6.1"]);
+    expect(screen.getByRole("button", { name: "All controls (3)" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Mine (2)" }));
+    expect(articles()).toEqual(["Control CC8.1", "Control CC7.1"]);
+    expect(screen.getByRole("button", { name: "Mine (2)" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Summary")).toHaveTextContent("Controls3");
+    fireEvent.click(screen.getByRole("button", { name: "All controls (3)" }));
+    expect(articles()).toHaveLength(3);
+  });
+
+  it("shows nothing extra when you own no controls, or when the user is not known", async () => {
+    open("nobody@acme.dev");
+    await screen.findByRole("article", { name: "Control CC8.1" });
+    expect(screen.queryByRole("region", { name: "Your controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Mine/ })).not.toBeInTheDocument();
+  });
+
+  it("with no signed-in email there is no filter at all", async () => {
+    open(undefined);
+    await screen.findByRole("article", { name: "Control CC8.1" });
+    expect(screen.queryByRole("region", { name: "Your controls" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the filter on across frameworks, and says plainly when you own nothing in the new one", async () => {
+    const { rerender } = open("ana@acme.dev");
+    fireEvent.click(await screen.findByRole("button", { name: "Mine (2)" }));
+    handler = () => report([clean("A.8.25", "bo@acme.dev")]);
+    rerender(<ControlGaps framework="iso27001" frameworkName="ISO 27001" color="#8b5cf6" members={[]} canEdit canExport currentEmail="ana@acme.dev" />);
+    expect(await screen.findByText("You don't own any controls in this framework.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "All controls (1)" }));
+    expect(await screen.findByRole("article", { name: "Control A.8.25" })).toBeInTheDocument();
+  });
+
+  it("assigning yourself an owner updates the count after the reload", async () => {
+    let owner: string | null = null;
+    handler = c => {
+      if (c.method === "PUT") { owner = (c.body as { owner_email: string }).owner_email; return { ok: true }; }
+      return report([control({ control_id: "CC8.1", owner })]);
+    };
+    gapsPanel({ currentEmail: "ana@acme.dev" });
+    expect(screen.queryByRole("region", { name: "Your controls" })).not.toBeInTheDocument();
+    fireEvent.change(await screen.findByLabelText("Owner"), { target: { value: "ana@acme.dev" } });
+    expect(await screen.findByRole("region", { name: "Your controls" })).toHaveTextContent("You own 1 control");
+  });
+});
+
 // ── Attestation signature check ───────────────────────────────────────────────────────────────────────────
 
 describe("AttestationProof", () => {

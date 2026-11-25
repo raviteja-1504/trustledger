@@ -447,7 +447,7 @@ export default function CompliancePage() {
         {/* ══ OWNERS & GAPS ══ */}
         {tab === "gaps" && !offline && (
           <ControlGaps framework={fw.id} frameworkName={fw.name} color={color} members={teamMembers.map(m => m.email)}
-            canEdit={permissions.canExportData} canExport={permissions.canExportData} />
+            canEdit={permissions.canExportData} canExport={permissions.canExportData} currentEmail={profile?.email} />
         )}
         {tab === "gaps" && offline && <div className="section-card p-6 text-sm text-gray-600">Owners and gaps come from your organisation&apos;s stored evidence. Connect a repository to see them.</div>}
 

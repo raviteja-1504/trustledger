@@ -42,9 +42,12 @@ const GAP: Record<Gap["kind"], { label: string; cls: string }> = {
 const humanize = (s: string) => s.replace(/_/g, " ").replace(/\bpr\b/g, "PR").replace(/^./, c => c.toUpperCase());
 const fmtDue = (iso: string | null) => (iso ? new Date(iso + "T00:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }) : "no due date");
 
-export default function ControlGaps({ framework, frameworkName, color, members, canEdit, canExport }: {
+export default function ControlGaps({ framework, frameworkName, color, members, canEdit, canExport, currentEmail }: {
   framework: string; frameworkName: string; color: string; members: string[]; canEdit: boolean; canExport: boolean;
+  /** The signed-in user, so the controls they own can be pointed out and filtered to. Nobody is notified. */
+  currentEmail?: string | null;
 }) {
+  const [onlyMine, setOnlyMine] = useState(false);
   const [report, setReport] = useState<Report | null>(null);
   const [failed, setFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,6 +87,10 @@ export default function ControlGaps({ framework, frameworkName, color, members, 
   if (!report) return <div className="section-card h-48 animate-pulse" aria-label="Loading owners and gaps" />;
   const s = report.summary;
   const ownerChoices = (current: string | null) => [...new Set([...(current ? [current] : []), ...members])].sort();
+  const me = currentEmail?.trim().toLowerCase() || null;
+  const mine = me ? report.controls.filter(c => c.owner?.toLowerCase() === me) : [];
+  const needAttention = mine.filter(c => c.gaps.length > 0 || c.flags.includes("remediation_overdue"));
+  const shown = onlyMine ? mine : report.controls;
 
   return (
     <div className="animate-fade-up space-y-4">
@@ -118,8 +125,27 @@ export default function ControlGaps({ framework, frameworkName, color, members, 
         ))}
       </dl>
 
+      {me && (mine.length > 0 || onlyMine) && (
+        <section aria-label="Your controls" className="section-card px-5 py-3 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-gray-700">
+            {mine.length === 0
+              ? "You don't own any controls in this framework."
+              : <>You own <strong>{mine.length}</strong> {mine.length === 1 ? "control" : "controls"}
+                  {needAttention.length > 0
+                    ? <>: <strong className="text-rose-700">{needAttention.length}</strong> {needAttention.length === 1 ? "needs" : "need"} attention (evidence gaps or overdue remediation).</>
+                    : ", and none has evidence gaps or overdue remediation."}</>}
+          </p>
+          <div role="group" aria-label="Which controls to show" className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-lg">
+            {([[false, `All controls (${report.controls.length})`], [true, `Mine (${mine.length})`]] as const).map(([value, label]) => (
+              <button key={label} aria-pressed={onlyMine === value} onClick={() => setOnlyMine(value)}
+                className={`px-3 py-1.5 text-[11px] font-semibold rounded-md transition-all ${onlyMine === value ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>{label}</button>
+            ))}
+          </div>
+        </section>
+      )}
+
       <div className="space-y-3">
-        {report.controls.map(c => (
+        {shown.map(c => (
           <article key={c.control_id} className="section-card px-5 py-4" aria-label={`Control ${c.control_id}`}>
             <div className="flex items-start justify-between gap-3 flex-wrap">
               <div className="flex items-start gap-3 min-w-0">

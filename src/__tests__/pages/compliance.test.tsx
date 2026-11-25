@@ -40,7 +40,10 @@ jest.mock("@/lib/useRealData", () => ({
     if (url.startsWith("/api/evidence/gaps")) return {
       framework_id: "soc2", mapping_version: "1.0", scope_disclaimer: "Technical evidence only.",
       summary: { controls: 1, with_gaps: 1, unowned: 1, untracked_gaps: 1, overdue: 0, resolved_but_gap_remains: 0 },
-      controls: [{ control_id: "CC8.1", control_name: "Changes are reviewed", status: "missing", owner: null, gaps: [{ evidence_type: "pr_approval", kind: "missing" }], remediations: [], flags: ["no_owner", "gap_untracked"] }],
+      controls: [
+        { control_id: "CC8.1", control_name: "Changes are reviewed", status: "missing", owner: null, gaps: [{ evidence_type: "pr_approval", kind: "missing" }], remediations: [], flags: ["no_owner", "gap_untracked"] },
+        { control_id: "CC7.1", control_name: "Vulnerabilities are tracked", status: "partial", owner: "admin@acme.test", gaps: [{ evidence_type: "security_scan", kind: "expired" }], remediations: [{ id: "e9", title: "Rescan monthly", status: "open", owner_email: "admin@acme.test", due_date: "2030-01-01", risk_accepted: false, overdue: false }], flags: [] },
+      ],
     };
     throw new Error(`unexpected ${url}`);
   }),
@@ -139,6 +142,16 @@ describe("Compliance page: owners and gaps tab", () => {
     expect(calls).toContain("/api/evidence/gaps?framework=soc2");
     expect(screen.getByRole("note")).toHaveTextContent("not a compliance verdict");
     expect(screen.getByText("Gap nobody is working on")).toBeInTheDocument();
+  });
+
+  it("points out the controls the signed-in user owns", async () => {
+    render(<CompliancePage />);
+    fireEvent.click(await screen.findByRole("tab", { name: "Owners & gaps" }));
+    const mine = await screen.findByRole("region", { name: "Your controls" });
+    expect(mine).toHaveTextContent("You own 1 control: 1 needs attention");
+    fireEvent.click(screen.getByRole("button", { name: /^Mine \(1\)/ }));
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.getByRole("article", { name: "Control CC7.1" })).toBeInTheDocument();
   });
 
   it("is not fetched until the tab is opened", async () => {
