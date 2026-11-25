@@ -47,7 +47,33 @@ function seenGuid(guid: string): boolean {
   return false;
 }
 
+// A delivery id stays in the cache only if this request succeeded. If handling throws or answers an error, GitHub's retry of
+// the same delivery (same GUID) must be processed, not dropped as a duplicate of a scan that never happened.
 async function handle(req: NextRequest) {
+  const ctx: { registeredGuid?: string } = {};
+  let res: NextResponse;
+  try { res = await handleDelivery(req, ctx); }
+  catch (err) { if (ctx.registeredGuid) recentGuids.delete(ctx.registeredGuid); throw err; }
+  if (ctx.registeredGuid && res.status >= 300) recentGuids.delete(ctx.registeredGuid);
+  return res;
+}
+
+// The scan never ran: say so on the check run instead of leaving GitHub spinning on "in_progress" forever. The re-run button
+// (check_run.rerequested) then works. Skipped when the worker itself answered with a failure, since it updates the check run.
+async function closeCheckRunAfterEnqueueFailure(
+  err: unknown, installationId: number | undefined, owner: string, repoName: string, checkRunId: number | null,
+) {
+  if (!checkRunId || !installationId || (err as { workerResponded?: boolean } | null)?.workerResponded) return;
+  try {
+    const { token } = await getInstallationToken(installationId);
+    await updateCheckRun(token, owner, repoName, checkRunId, {
+      name: "TrustLedger AI Governance", status: "completed", conclusion: "neutral",
+      output: { title: "Scan could not be started", summary: "TrustLedger could not queue this scan. Use \"Re-run\" on this check to try again." },
+    });
+  } catch { /* the failure is already recorded as an ops event */ }
+}
+
+async function handleDelivery(req: NextRequest, ctx: { registeredGuid?: string }) {
   const rawBody = await req.text();
 
   // ── 0a. Request size limit ─────────────────────────────────────────────────
@@ -71,8 +97,9 @@ async function handle(req: NextRequest) {
   // retries / misconfigured mirrors). The scan-worker's idempotency check on
   // (org_id, repo, commit_sha, pr_number) handles cross-process / cross-instance
   // duplicates; both guards together prevent double-scanning under all conditions.
-  if (deliveryGuid && seenGuid(deliveryGuid)) {
-    return NextResponse.json({ ok: true, skipped: true, reason: "duplicate_delivery" });
+  if (deliveryGuid) {
+    if (seenGuid(deliveryGuid)) return NextResponse.json({ ok: true, skipped: true, reason: "duplicate_delivery" });
+    ctx.registeredGuid = deliveryGuid;
   }
 
   const payload = JSON.parse(rawBody) as Record<string, unknown>;
@@ -223,7 +250,11 @@ async function handle(req: NextRequest) {
         trace_id:         currentTrace()?.trace_id,
       }).then(
         () => recordEvent({ kind: "scan.queued", data: { head_sha: headSha, check_run_id: checkRunId, action } }),
-        err => { reportServerError(err, { code: "enqueue_failed" }); return recordEvent({ kind: "scan.enqueue_failed", message: "Couldn't queue the scan", data: { error: err instanceof Error ? err.message : String(err) } }); },
+        async err => {
+          reportServerError(err, { code: "enqueue_failed" });
+          await closeCheckRunAfterEnqueueFailure(err, installationId, owner, repoName, checkRunId);
+          return recordEvent({ kind: "scan.enqueue_failed", message: "Couldn't queue the scan", data: { error: err instanceof Error ? err.message : String(err) } });
+        },
       ),
     );
 
@@ -308,7 +339,11 @@ async function handle(req: NextRequest) {
         trace_id:         currentTrace()?.trace_id,
       }).then(
         () => recordEvent({ kind: "scan.queued", data: { head_sha: headSha, check_run_id: checkRunId, action: "rerequested" } }),
-        err => { reportServerError(err, { code: "enqueue_failed" }); return recordEvent({ kind: "scan.enqueue_failed", message: "Couldn't queue the re-run", data: { error: err instanceof Error ? err.message : String(err) } }); },
+        async err => {
+          reportServerError(err, { code: "enqueue_failed" });
+          await closeCheckRunAfterEnqueueFailure(err, scan.installation_id, owner, repoName, checkRunId);
+          return recordEvent({ kind: "scan.enqueue_failed", message: "Couldn't queue the re-run", data: { error: err instanceof Error ? err.message : String(err) } });
+        },
       ),
     );
 

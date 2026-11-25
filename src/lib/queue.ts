@@ -27,6 +27,11 @@ export interface ScanJob {
   trace_id?:        string;
 }
 
+/** The scan did not get queued or run. `workerResponded` means the worker did run and reported its own failure (it has already updated the check run). */
+export class ScanNotQueuedError extends Error {
+  constructor(message: string, readonly workerResponded = false) { super(message); this.name = "ScanNotQueuedError"; }
+}
+
 /** Strip UTF-8 BOM and whitespace that Windows CLI piping adds to env vars. */
 function cleanEnv(val: string | undefined, fallback = ""): string {
   return (val ?? fallback).replace(/^﻿/, "").trim();
@@ -52,7 +57,7 @@ async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
   if (!secret) {
     // The worker would refuse the call (production without INTERNAL_SECRET accepts only QStash signatures).
     console.error("[queue] cannot run the scan directly: INTERNAL_SECRET is not set in production");
-    return;
+    throw new ScanNotQueuedError("no queue configured and INTERNAL_SECRET is not set");
   }
   console.log("[queue] calling scan-worker at", workerUrl, "secret len:", secret.length);
   const res = await fetch(workerUrl, {
@@ -62,6 +67,8 @@ async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
   });
   const body = await res.json().catch(() => ({}));
   console.log("[queue] scan-worker response:", res.status, JSON.stringify(body).slice(0, 300));
+  // The direct path has no QStash retry behind it: a non-2xx here means the scan did not run, and the caller must know.
+  if (!res.ok) throw new ScanNotQueuedError(`scan-worker answered ${res.status}`, true);
 }
 
 export async function enqueueScan(job: ScanJob): Promise<void> {
