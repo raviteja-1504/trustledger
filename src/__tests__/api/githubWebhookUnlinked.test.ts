@@ -32,9 +32,11 @@ const body = (owner: string) => JSON.stringify({
   repository: { full_name: `${owner}/app` },
   pull_request: { number: 7, head: { sha: "abc123", ref: "feat" }, user: { login: "dev" }, additions: 1, deletions: 0, commits: 1, changed_files: 1, created_at: "2026-11-11T00:00:00Z" },
 });
+let deliverySeq = 0;
 const send = async (raw: string) => {
   const sig = "sha256=" + crypto.createHmac("sha256", SECRET).update(raw).digest("hex");
-  const res = await POST(new NextRequest(new URL("/api/webhook/github", "https://app.example"), { method: "POST", body: raw, headers: { "x-hub-signature-256": sig, "x-github-event": "pull_request", "x-github-delivery": "d-1" } }));
+  // a fresh delivery id per request: the route drops repeated GUIDs within a process (duplicate_delivery)
+  const res = await POST(new NextRequest(new URL("/api/webhook/github", "https://app.example"), { method: "POST", body: raw, headers: { "x-hub-signature-256": sig, "x-github-event": "pull_request", "x-github-delivery": `d-${++deliverySeq}` } }));
   return { status: res.status, body: await res.json() as Record<string, unknown> };
 };
 
