@@ -3,7 +3,8 @@
  * PATCH /api/evidence/[id]  — lifecycle transition: verify | revoke | refresh
  *
  * Actions (body.action):
- *   "verify"  — recompute the content hash from body.payload and update status
+ *   "verify"  — recompute the content hash from the stored record and check it against the audit log;
+ *               verified on a match, verification_failed on a mismatch (body.payload only for older records)
  *   "revoke"  — mark the record revoked; body.reason is required
  *   "refresh" — collect a new record superseding this one; returns the new id
  */
@@ -17,11 +18,9 @@ import {
   rowToEvidenceRecord,
   evidenceRecordToRow,
   buildEvidenceRecord,
-  verifyRecord,
-  markVerified,
   markRevoked,
-  canonicalPayload,
 } from "@/lib/evidenceRecord";
+import { verifyStoredEvidence } from "@/lib/evidenceVerification";
 import crypto from "crypto";
 
 type Params = { params: Promise<{ id: string }> };
@@ -73,22 +72,33 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   }
 
   // ── verify ────────────────────────────────────────────────────────────────
+  // Recomputes the hash from the stored record (hash_version 2) and checks it against the copy in the audit log.
+  // body.payload is only needed for records collected before hash_version 2, whose hashed values were not stored.
   if (body.action === "verify") {
-    if (!body.payload) return NextResponse.json({ error: "missing_payload" }, { status: 400 });
-    const valid = verifyRecord(record, body.payload);
-    const updated = markVerified(record);
-    const updatedRow = evidenceRecordToRow(updated);
-
+    const outcome = await verifyStoredEvidence(db, auth.org_id, record, body.payload);
+    if (outcome.result === "unchanged") {
+      return NextResponse.json({
+        error: "legacy_record_needs_payload", integrity: outcome.integrity,
+        message: "This record predates re-verifiable hashes. Supply the original payload as body.payload to verify it.",
+      }, { status: 422 });
+    }
+    const updatedRow = evidenceRecordToRow(outcome.record);
     await db.from("evidence_log").update({ note: updatedRow.note }).eq("id", id).eq("org_id", auth.org_id);
 
     await writeAuditLog(db, {
       org_id: auth.org_id, event_type: "evidence_collected",
       actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
       resource_type: "evidence_log", resource_id: id,
-      payload: { action: "verify", hash_match: valid, status: updated.verification_status },
+      payload: { action: "verify", integrity: outcome.integrity, anchor: outcome.anchor, status: outcome.record.verification_status },
     });
 
-    return NextResponse.json({ ok: true, hash_match: valid, verification_status: updated.verification_status });
+    return NextResponse.json({
+      ok: outcome.result === "verified",
+      hash_match: outcome.integrity === "intact",
+      integrity: outcome.integrity,
+      anchor: outcome.anchor,
+      verification_status: outcome.record.verification_status,
+    });
   }
 
   // ── revoke ────────────────────────────────────────────────────────────────

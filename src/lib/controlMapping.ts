@@ -382,7 +382,17 @@ export interface ControlCoverageResult {
   satisfied_types:  EvidenceType[];
   missing_types:    EvidenceType[];
   expired_types:    EvidenceType[];
+  /**
+   * Requirements that have a current record which was NOT counted because it failed verification (its hash does not
+   * match). They are also listed in missing_types: an unverifiable record supports nothing. Absent when empty.
+   */
+  unverified_types?: EvidenceType[];
   freshness_days:   number | null;
+}
+
+export interface CoverageOptions {
+  /** Return false for a record that must not count (hash mismatch, failed verification). Default: every record is trusted. */
+  isTrusted?: (record: EvidenceRecord) => boolean;
 }
 
 /**
@@ -393,6 +403,7 @@ export function coverageReport(
   frameworkId: string,
   records:     EvidenceRecord[],
   now = new Date(),
+  opts: CoverageOptions = {},
 ): ControlCoverageResult[] {
   const fw = getFrameworkMapping(frameworkId);
   if (!fw) return [];
@@ -405,16 +416,23 @@ export function coverageReport(
     const satisfied_types: EvidenceType[] = [];
     const missing_types:   EvidenceType[] = [];
     const expired_types:   EvidenceType[] = [];
+    const unverified_types: EvidenceType[] = [];
+    const trusted = (r: EvidenceRecord) => r.verification_status !== "verification_failed" && (opts.isTrusted ? opts.isTrusted(r) : true);
 
     for (const req of ctrl.required_evidence) {
       const matching = ctrlRecords.filter(r => r.evidence_type === req.evidence_type);
       if (matching.length === 0) {
         missing_types.push(req.evidence_type);
       } else {
-        const hasActive = matching.some(r => !isExpired(r, now) && r.verification_status !== "revoked");
+        const live = matching.filter(r => !isExpired(r, now) && r.verification_status !== "revoked");
+        const hasActive = live.some(trusted);
         const hasExpired = matching.some(r => isExpired(r, now));
         if (hasActive) {
           satisfied_types.push(req.evidence_type);
+        } else if (live.length > 0) {
+          // current records exist, but none passes verification: they do not count
+          unverified_types.push(req.evidence_type);
+          missing_types.push(req.evidence_type);
         } else if (hasExpired) {
           expired_types.push(req.evidence_type);
         } else {
@@ -433,7 +451,7 @@ export function coverageReport(
             : "missing";
 
     // Freshness: days until the soonest-expiring active record for this control
-    const activeRecords = ctrlRecords.filter(r => !isExpired(r, now) && r.verification_status !== "revoked");
+    const activeRecords = ctrlRecords.filter(r => !isExpired(r, now) && r.verification_status !== "revoked" && trusted(r));
     const freshness_days = activeRecords.length > 0
       ? Math.min(...activeRecords.map(r => Math.round((new Date(r.expiration_date).getTime() - now.getTime()) / 86_400_000)))
       : null;
@@ -446,6 +464,7 @@ export function coverageReport(
       satisfied_types,
       missing_types,
       expired_types,
+      ...(unverified_types.length > 0 ? { unverified_types } : {}),
       freshness_days,
     };
   });
@@ -468,10 +487,11 @@ export function frameworkCoverageSummary(
   frameworkId: string,
   records:     EvidenceRecord[],
   now = new Date(),
+  opts: CoverageOptions = {},
 ): FrameworkCoverageSummary | undefined {
   const fw = getFrameworkMapping(frameworkId);
   if (!fw) return undefined;
-  const controls = coverageReport(frameworkId, records, now);
+  const controls = coverageReport(frameworkId, records, now, opts);
   return {
     framework_id:     fw.framework_id,
     mapping_version:  fw.mapping_version,

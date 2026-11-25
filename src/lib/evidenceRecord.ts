@@ -51,7 +51,8 @@ export type EvidenceLifecycleStatus =
   | "verified"              // content hash confirmed against source
   | "active"                // in-use, within its expiration window
   | "expired"               // past its expiration_date; needs refresh
-  | "revoked";              // explicitly invalidated (superseded, found incorrect, etc.)
+  | "revoked"               // explicitly invalidated (superseded, found incorrect, etc.)
+  | "verification_failed";  // the content hash (or its audit-log copy) did not match: treat as untrusted
 
 /** Default TTL in days for each evidence type. Expressed as calendar days. */
 export const EVIDENCE_TTL_DAYS: Record<EvidenceType, number> = {
@@ -104,11 +105,20 @@ export interface EvidenceRecord {
    */
   content_hash: string;
   verification_status: EvidenceLifecycleStatus;
+  /**
+   * 2 = content_hash can be recomputed from the stored row (the row id and created_at are the values that were
+   * hashed). Absent / 1 = a record from before that: its hash covered a random id and a timestamp the database
+   * later replaced, so it cannot be re-derived and is reported as legacy, not as tampered.
+   */
+  hash_version?: 1 | 2;
   /** ISO 8601 UTC date after which this record must be refreshed. */
   expiration_date: string;
   /** Free-text note (shown in the audit trail and auditor export). */
   note?: string;
 }
+
+/** Current hash version: written on every new record. */
+export const HASH_VERSION = 2 as const;
 
 // ── Content hashing ───────────────────────────────────────────────────────────
 
@@ -183,6 +193,7 @@ export function buildEvidenceRecord(
     ...withExpiry,
     content_hash,
     verification_status: "pending_verification",
+    hash_version: HASH_VERSION,
   };
 }
 
@@ -192,6 +203,22 @@ export function buildEvidenceRecord(
  */
 export function verifyRecord(record: EvidenceRecord, payload: string): boolean {
   return computeContentHash(payload) === record.content_hash;
+}
+
+export type IntegrityResult =
+  | "intact"               // the hash recomputes from the stored fields
+  | "mismatch"             // it does not: a hashed field changed after collection
+  | "legacy_unverifiable"; // hash_version 1: the hashed values were never stored, so nothing can be checked
+
+/** Recompute the hash from the record's own fields and compare it to the stored one. */
+export function checkIntegrity(record: EvidenceRecord): IntegrityResult {
+  if (record.hash_version !== HASH_VERSION) return "legacy_unverifiable";
+  return computeContentHash(canonicalPayload(record)) === record.content_hash ? "intact" : "mismatch";
+}
+
+/** Returns a copy marked "verification_failed". Does NOT write to the DB. */
+export function markVerificationFailed(record: EvidenceRecord): EvidenceRecord {
+  return { ...record, verification_status: "verification_failed" };
 }
 
 /**
@@ -235,6 +262,8 @@ export interface EvidenceLogRow {
 
 interface NotePayload {
   v:                   1;
+  /** Hash version (see EvidenceRecord.hash_version); absent on records written before version 2. */
+  hv?:                 2;
   evidence_type:       EvidenceType;
   content_hash:        string;
   verification_status: EvidenceLifecycleStatus;
@@ -257,6 +286,7 @@ export function evidenceRecordToRow(r: EvidenceRecord): EvidenceLogRow {
     expiration_date:     r.expiration_date,
     collector_identity:  r.collector_identity,
   };
+  if (r.hash_version === HASH_VERSION) notePayload.hv = HASH_VERSION;
   if (r.repository_id)  notePayload.repository_id  = r.repository_id;
   if (r.commit_sha)     notePayload.commit_sha     = r.commit_sha;
   if (r.scan_id)        notePayload.scan_id        = r.scan_id;
@@ -264,6 +294,8 @@ export function evidenceRecordToRow(r: EvidenceRecord): EvidenceLogRow {
   if (r.note)           notePayload.user_note      = r.note;
 
   return {
+    // A version-2 record stores the id and time that were hashed, so the stored row can be re-verified.
+    ...(r.hash_version === HASH_VERSION ? { id: r.evidence_id, created_at: r.collection_timestamp } : {}),
     org_id:             r.org_id,
     framework_id:       r.framework,
     control_id:         r.control_id,
@@ -295,11 +327,13 @@ export function rowToEvidenceRecord(row: EvidenceLogRow & { id: string; created_
     commit_sha:          n.commit_sha,
     scan_id:             n.scan_id,
     attestation_id:      n.attestation_id,
-    collection_timestamp: row.created_at,
+    // The database returns timestamptz in its own spelling ("+00:00", microseconds); the hash covers the ISO form.
+    collection_timestamp: Number.isNaN(Date.parse(row.created_at)) ? row.created_at : new Date(row.created_at).toISOString(),
     collector_identity:  n.collector_identity ?? row.collected_by ?? "unknown",
     content_hash:        n.content_hash ?? "",
     verification_status: n.verification_status ?? "pending_verification",
     expiration_date:     n.expiration_date ?? row.created_at,
+    hash_version:        n.hv === HASH_VERSION ? HASH_VERSION : 1,
     note:                n.user_note,
   };
 }

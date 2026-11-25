@@ -10,7 +10,8 @@
  *   - Evidence records collected in the period (metadata + content hashes)
  *   - Control coverage analysis (satisfied / partial / missing / expired)
  *   - Audit trail entries for evidence collection in the period
- *   - Ed25519 cryptographic signature over the canonical package (when configured)
+ *   - Ed25519 cryptographic signature over the WHOLE package, as canonical JSON with keys sorted at every level
+ *     (when configured). scripts/verify-evidence-export.cjs checks it, and re-derives every record's content hash.
  *   - Framework version used for evaluation
  *
  * Query params:
@@ -29,9 +30,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { writeAuditLog, canonicalJson } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
-import { rowToEvidenceRecord } from "@/lib/evidenceRecord";
+import { rowToEvidenceRecord, checkIntegrity } from "@/lib/evidenceRecord";
+import { anchorStatus, isTrustedEvidence } from "@/lib/evidenceVerification";
 import {
   getFrameworkMapping,
   frameworkCoverageSummary,
@@ -83,11 +85,24 @@ export async function GET(req: NextRequest) {
     .order("created_at", { ascending: true }) as { data: Array<Record<string, unknown>> | null };
 
   const now = new Date();
-  const coverage = frameworkCoverageSummary(fw.framework_id, records, now);
+  // Each record's hash is recomputed here, and compared with the copy in the audit log, so the package reports
+  // what is true now rather than a stored status. A record that fails neither counts toward a control.
+  const payloadsByResource = new Map<string, unknown[]>();
+  for (const a of auditRows ?? []) {
+    const rid = a["resource_id"];
+    if (typeof rid === "string") payloadsByResource.set(rid, [...(payloadsByResource.get(rid) ?? []), a["payload"]]);
+  }
+  const anchors = new Map<string, ReturnType<typeof anchorStatus>>(records.map(r => [
+    r.evidence_id, anchorStatus(payloadsByResource.get(r.evidence_id) ?? [], r.content_hash),
+  ]));
+  const coverage = frameworkCoverageSummary(fw.framework_id, records, now, { isTrusted: r => isTrustedEvidence(r, anchors.get(r.evidence_id)) });
 
   // Build the canonical export document.
   const pkg = {
-    export_version:    "1.0",
+    export_version:    "1.1",
+    // What the signature covers: this whole document except `cryptographic_verification`, serialised as canonical
+    // JSON (object keys sorted at every level, no whitespace). Version 1.0 signed only top-level scalars.
+    signature_scheme:  "canonical-json-sorted-keys",
     generated_at:      now.toISOString(),
     generated_by:      auth.actor_email ?? auth.user_id ?? "system",
     org_id:            auth.org_id,
@@ -127,6 +142,11 @@ export async function GET(req: NextRequest) {
       collection_timestamp: r.collection_timestamp,
       collector_identity:  r.collector_identity,
       content_hash:        r.content_hash,
+      // 2: content_hash recomputes from the fields shown here (scripts/verify-evidence-export.cjs does so).
+      // 1: collected before that; its hash cannot be recomputed and counts only once it has been verified.
+      hash_version:        r.hash_version ?? 1,
+      integrity:           checkIntegrity(r),
+      audit_anchor:        anchors.get(r.evidence_id),
       verification_status: r.verification_status,
       expiration_date:     r.expiration_date,
     })),
@@ -146,8 +166,8 @@ export async function GET(req: NextRequest) {
   };
 
   // ── Cryptographic signature ───────────────────────────────────────────────
-  const canonical = JSON.stringify(pkg, Object.keys(pkg).sort());
-  const signature  = signEd25519(canonical, "evidence-export canonical JSON (all top-level keys sorted)");
+  const canonical = canonicalJson(pkg);
+  const signature  = signEd25519(canonical, "canonical JSON of this document without cryptographic_verification: object keys sorted at every level, no whitespace");
 
   const response = {
     ...pkg,
@@ -158,7 +178,7 @@ export async function GET(req: NextRequest) {
           public_key_pem: signature.public_key_pem,
           signature:      signature.value,
           signed_content: signature.signed_content,
-          note:           "Verify with: trustledger verify-evidence-export <file>  (uses /.well-known/trustledger-export-signing-key)",
+          note:           "Verify offline with scripts/verify-evidence-export.cjs <file> [trusted-public-key.pem]. Trust the key only if it matches the one published at /.well-known/trustledger-export-signing-key.",
         }
       : { note: "No signing key configured; set EXPORT_SIGNING_PRIVATE_KEY to enable Ed25519 signatures." },
   };
