@@ -14,6 +14,22 @@ import { buildAuditHash } from "./scanner";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
 
+/**
+ * Serialises writeAuditLog calls per org within a single process.
+ *
+ * This prevents in-process concurrent writers from forking the chain. It does NOT protect against
+ * forks across separate server instances. The proper distributed fix requires a PostgreSQL advisory
+ * lock (pg_advisory_xact_lock(org_id_hash)) held inside a transaction that spans the SELECT and
+ * INSERT. That requires a database function and a migration, which is a future hardening step.
+ *
+ * Threat model: a fork creates two valid branches from the same parent hash. Neither branch is
+ * "wrong" in terms of content integrity, but chain verification will return FORK_DETECTED,
+ * allowing operators to investigate and resolve the split. Hash chaining alone does not prevent a
+ * privileged administrator from rewriting the entire chain — it only makes rewrites detectable by
+ * independent observers who have cached prior hashes.
+ */
+const _writeLocks = new Map<string, Promise<void>>();
+
 export type AuditEventType =
   | "scan_complete" | "attestation" | "merge_blocked" | "merge_allowed"
   | "policy_violation" | "policy_change" | "secret_detected" | "secret_resolved"
@@ -60,7 +76,27 @@ export async function writeAuditLog(
   db: SupabaseClient<Database>,
   entry: AuditEntry,
 ): Promise<void> {
-  // Get the most recent entry hash for this org (to build the chain)
+  // Serialise writes for this org within this process (best-effort; not distributed-safe).
+  const prev = _writeLocks.get(entry.org_id) ?? Promise.resolve();
+  let releaseLock!: () => void;
+  const lock = new Promise<void>(r => { releaseLock = r; });
+  _writeLocks.set(entry.org_id, lock);
+
+  try {
+    await prev;
+    await _writeAuditLogInner(db, entry);
+  } finally {
+    releaseLock();
+    // Clean up once the slot is no longer the latest promise for this org.
+    if (_writeLocks.get(entry.org_id) === lock) _writeLocks.delete(entry.org_id);
+  }
+}
+
+async function _writeAuditLogInner(
+  db: SupabaseClient<Database>,
+  entry: AuditEntry,
+): Promise<void> {
+  // Read the most recent entry hash inside the (best-effort) lock.
   const { data: prev } = await db
     .from("audit_log")
     .select("entry_hash")
@@ -90,14 +126,33 @@ export async function writeAuditLog(
 
 export interface ChainRow { id: number; event_type: string; actor_email: string | null; payload: unknown; prev_hash: string | null; entry_hash: string; created_at: string }
 
+/**
+ * Explicit verification outcome, returned alongside the boolean `valid` for callers that need
+ * finer-grained reporting.
+ *
+ * - VALID:           every entry verified, no forks.
+ * - FORK_DETECTED:   two or more entries share the same parent hash (concurrent writers created
+ *                    a branch). The chain content is not corrupted, but ordering is ambiguous.
+ * - MISSING_RECORDS: an entry points at a prev_hash that is not in the loaded rows — a record
+ *                    was deleted or the chain was truncated.
+ * - INVALID:         an entry's contents no longer hash to their stored entry_hash — the row was
+ *                    modified in place.
+ * - INCOMPLETE:      verification could not run (e.g. a database error was thrown before all
+ *                    rows were loaded).
+ */
+export type VerificationStatus = "VALID" | "FORK_DETECTED" | "MISSING_RECORDS" | "INVALID" | "INCOMPLETE";
+
 export interface ChainVerification {
+  /** Explicit status (see VerificationStatus). Use this instead of `valid` where possible. */
+  status: VerificationStatus;
+  /** Backward-compatible boolean summary: true only when status is VALID or FORK_DETECTED. */
   valid: boolean;
   total: number;
   /** Entries whose contents were recomputed and matched. */
   verified: number;
   /** Older entries (before the first recomputable one) whose contents can't be recomputed; their links were checked. */
   legacy: number;
-  /** Entries written at the same moment as another, both pointing at the same previous entry (not tampering). */
+  /** Entries where two (or more) entries share the same prev_hash. FORK_DETECTED is set when this is > 0. */
   concurrent: number;
   /** id of the first entry that fails: its link points nowhere, or its recomputable contents changed. */
   broken_at?: number;
@@ -121,7 +176,7 @@ export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
     // Links: the first entry starts the chain; every other must point at an earlier entry's hash.
     if (i > 0 || r.prev_hash != null) {
       if (r.prev_hash == null || !seenHashes.has(r.prev_hash)) {
-        return { ...base, verified, legacy, concurrent, valid: false, broken_at: r.id, reason: "missing_link" };
+        return { ...base, verified, legacy, concurrent, status: "MISSING_RECORDS", valid: false, broken_at: r.id, reason: "missing_link" };
       }
       if (linkedFrom.has(r.prev_hash)) concurrent++;
       linkedFrom.add(r.prev_hash);
@@ -131,10 +186,11 @@ export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
     const ok = auditEntryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash;
     if (ok) { recomputable = true; verified++; }
     else if (!recomputable) legacy++;
-    else return { ...base, verified, legacy, concurrent, valid: false, broken_at: r.id, reason: "content_changed" };
+    else return { ...base, verified, legacy, concurrent, status: "INVALID", valid: false, broken_at: r.id, reason: "content_changed" };
     seenHashes.add(r.entry_hash);
   }
-  return { ...base, verified, legacy, concurrent, valid: true };
+  const status: VerificationStatus = concurrent > 0 ? "FORK_DETECTED" : "VALID";
+  return { ...base, verified, legacy, concurrent, status, valid: true };
 }
 
 const PAGE = 1000;
@@ -146,16 +202,29 @@ export async function verifyAuditChain(
   org_id: string,
 ): Promise<ChainVerification> {
   const rows: ChainRow[] = [];
-  for (let from = 0; from < MAX_ROWS; from += PAGE) {
-    const { data, error } = await db
-      .from("audit_log")
-      .select("id, event_type, actor_email, payload, prev_hash, entry_hash, created_at")
-      .eq("org_id", org_id)
-      .order("id", { ascending: true })
-      .range(from, from + PAGE - 1) as { data: ChainRow[] | null; error: unknown };
-    if (error) throw error;
-    rows.push(...(data ?? []));
-    if (!data || data.length < PAGE) break;
+  try {
+    for (let from = 0; from < MAX_ROWS; from += PAGE) {
+      const { data, error } = await db
+        .from("audit_log")
+        .select("id, event_type, actor_email, payload, prev_hash, entry_hash, created_at")
+        .eq("org_id", org_id)
+        .order("id", { ascending: true })
+        .range(from, from + PAGE - 1) as { data: ChainRow[] | null; error: unknown };
+      if (error) throw error;
+      rows.push(...(data ?? []));
+      if (!data || data.length < PAGE) break;
+    }
+  } catch {
+    return {
+      status: "INCOMPLETE",
+      valid: false,
+      total: rows.length,
+      verified: 0,
+      legacy: 0,
+      concurrent: 0,
+      first_at: rows[0]?.created_at ?? null,
+      last_at: rows[rows.length - 1]?.created_at ?? null,
+    };
   }
   return checkAuditChain(rows);
 }
