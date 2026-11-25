@@ -77,7 +77,8 @@ describe("queue direct-call fallback", () => {
 
   it("in production without INTERNAL_SECRET it sends nothing (never the 'dev' value)", async () => {
     process.env.VERCEL_ENV = "production";
-    await enqueueScan(JOB);
+    // It reports that nothing ran (so callers don't claim the scan was queued), and sends nothing.
+    await expect(enqueueScan(JOB)).rejects.toMatchObject({ name: "ScanNotQueuedError", workerResponded: false });
     expect(calls).toEqual([]);
   });
 
