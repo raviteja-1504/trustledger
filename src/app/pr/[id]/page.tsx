@@ -16,6 +16,7 @@ import { DEFAULT_GATE, blocksMerge } from "@/lib/mergeGate";
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
 import { useAttestationsRealtime } from "@/lib/realtime";
 import { authedFetch } from "@/lib/useRealData";
+import AttestationProof from "@/components/AttestationProof";
 import { readLocalStatuses, recordLocalStatuses } from "@/lib/localStatuses";
 import { invalidateServerStatuses } from "@/lib/violationStatuses";
 import { formatDateTime, useTimezone } from "@/lib/timezone";
@@ -836,9 +837,12 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
                 <div>
                   <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">Attestation</p>
                   {attested ? (
-                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
-                      <CheckCircleIcon size={13} /> Reviewer confirmed
-                    </span>
+                    <>
+                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+                        <CheckCircleIcon size={13} /> Reviewer confirmed
+                      </span>
+                      {file.attestation_id && <AttestationProof attestationId={file.attestation_id} />}
+                    </>
                   ) : isHigh ? (
                     <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-600">
                       <AlertTriIcon size={13} /> Required before deploy

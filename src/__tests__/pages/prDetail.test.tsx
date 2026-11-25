@@ -184,3 +184,42 @@ describe("PR page: triage", () => {
     expect(JSON.parse(init.body)).toMatchObject({ repo: "acme/shop", status: "accepted", reason: "Behind the VPN" });
   });
 });
+
+describe("PR page: signature check on attested files", () => {
+  const verifyAs = (result: string) => (authedFetch as jest.Mock).mockImplementation(async (url: string) =>
+    url.startsWith("/api/attest/verify") ? { verify_result: result, has_signature: true, is_inherited: false } : {});
+
+  it("an attested file can be checked, and the answer is shown in words", async () => {
+    scan.files[0] = file("src/db.ts", "CRITICAL", [ind("sql-injection", 5, "critical")], { attested: true, attestation_id: "att-9" }) as never;
+    verifyAs("key_retired");
+    await renderPage();
+    fireEvent.click(fileCell("db.ts"));
+    fireEvent.click(await screen.findByRole("button", { name: "Check signature" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/Signature valid.*retired/);
+    expect((authedFetch as jest.Mock).mock.calls.map(c => c[0])).toContain("/api/attest/verify?id=att-9");
+  });
+
+  it("a tampered attestation is reported as such", async () => {
+    scan.files[0] = file("src/db.ts", "CRITICAL", [ind("sql-injection", 5, "critical")], { attested: true, attestation_id: "att-9" }) as never;
+    verifyAs("invalid");
+    await renderPage();
+    fireEvent.click(fileCell("db.ts"));
+    fireEvent.click(await screen.findByRole("button", { name: "Check signature" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("may have been altered");
+  });
+
+  it("offers no check for a file nobody has attested", async () => {
+    await renderPage();
+    fireEvent.click(fileCell("db.ts"));
+    await screen.findByTestId("flagged-position");
+    expect(screen.queryByRole("button", { name: "Check signature" })).not.toBeInTheDocument();
+  });
+
+  it("offers no check for an attested file whose scan has no attestation id (an older response)", async () => {
+    scan.files[1] = file("src/api.ts", "HIGH", [ind("path-traversal", 8, "high")], { attested: true }) as never;
+    await renderPage();
+    fireEvent.click(fileCell("api.ts"));
+    await screen.findByText("Reviewer confirmed");
+    expect(screen.queryByRole("button", { name: "Check signature" })).not.toBeInTheDocument();
+  });
+});

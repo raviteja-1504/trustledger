@@ -117,6 +117,22 @@ describe(`a ${N}-file scan behind a ${PAGE_SIZE}-row response cap`, () => {
     expect(scan.lifecycle.summary).toMatchObject({ new: 0, existing: N });
   });
 
+  it("each attested file carries the id of its newest attestation, for the signature check", async () => {
+    const atts = db.client.from("attestations") as unknown as { insert: (r: unknown) => PromiseLike<unknown> };
+    const base = { org_id: "org-1", scan_id: SCAN, risk_score: "CRITICAL", reviewer_email: "lead@acme.dev", payload_hash: "p" };
+    await atts.insert([
+      { ...base, id: "att-a-old", file_path: path(3), created_at: "2026-10-24T10:00:00Z" },
+      { ...base, id: "att-b-new", file_path: path(3), created_at: "2026-10-24T11:00:00Z" },
+      { ...base, id: "att-1200", file_path: path(1200), created_at: "2026-10-24T10:00:00Z" },
+    ]);
+    const scan = await (await getScan(req(`/api/scans/${SCAN}`), params)).json() as { files: Array<{ file_path: string; attested: boolean; attestation_id?: string }> };
+    const byPath = new Map(scan.files.map(f => [f.file_path, f]));
+    expect(byPath.get(path(3))).toMatchObject({ attested: true, attestation_id: "att-b-new" });
+    expect(byPath.get(path(1200))).toMatchObject({ attested: true, attestation_id: "att-1200" });   // past the 1000-row cap
+    expect(byPath.get(path(4))).toMatchObject({ attested: false });
+    expect(byPath.get(path(4))!.attestation_id).toBeUndefined();
+  });
+
   it("the scan reports its AI share by code volume over every file, not just the first 1,000", async () => {
     const scan = await (await getScan(req(`/api/scans/${SCAN}`), params)).json() as { ai_attribution: { eligible_loc: number; unknown_loc: number; analyzed_loc: number; excluded_loc: number } };
     // every file here is 20 lines: too short to judge, so all of it is unknown -- and all N files are counted

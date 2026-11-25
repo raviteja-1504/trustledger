@@ -23,9 +23,10 @@ import {
   type CheckKey, type ComplianceFacts, type EvidenceStatus, type FrameworkDef,
 } from "@/lib/controlEvidence";
 import { REGISTER_CONTROL } from "@/lib/changeRegisterShared";
+import ControlGaps from "@/components/ControlGaps";
 
 type FrameworkId = FrameworkDef["id"];
-type PageTab = "controls" | "map" | "exceptions";
+type PageTab = "controls" | "map" | "exceptions" | "gaps";
 
 interface Exception {
   id: string;
@@ -313,7 +314,7 @@ export default function CompliancePage() {
 
         {/* ── Tabs ── */}
         <div className="animate-fade-up flex items-center gap-1 bg-gray-100 p-0.5 rounded-xl w-fit" role="tablist">
-          {([["controls", "Controls"], ["map", "Control map"], ["exceptions", `Exceptions (${fwExceptions.filter(e => e.status !== "resolved").length})`]] as const).map(([t, label]) => (
+          {([["controls", "Controls"], ["map", "Control map"], ["exceptions", `Exceptions (${fwExceptions.filter(e => e.status !== "resolved").length})`], ["gaps", "Owners & gaps"]] as const).map(([t, label]) => (
             <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
               className={`px-4 py-2 text-xs font-semibold rounded-lg transition-all ${tab === t ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
               {label}
@@ -321,7 +322,7 @@ export default function CompliancePage() {
           ))}
         </div>
 
-        {factsFailed && tab !== "exceptions" && (
+        {factsFailed && tab !== "exceptions" && tab !== "gaps" && (
           <div className="section-card p-5 text-sm text-rose-700">
             Couldn&apos;t collect evidence right now. <button onClick={() => setRefreshKey(k => k + 1)} className="font-bold underline">Try again</button>
           </div>
@@ -442,6 +443,13 @@ export default function CompliancePage() {
             </div>
           </div>
         )}
+
+        {/* ══ OWNERS & GAPS ══ */}
+        {tab === "gaps" && !offline && (
+          <ControlGaps framework={fw.id} frameworkName={fw.name} color={color} members={teamMembers.map(m => m.email)}
+            canEdit={permissions.canExportData} canExport={permissions.canExportData} />
+        )}
+        {tab === "gaps" && offline && <div className="section-card p-6 text-sm text-gray-600">Owners and gaps come from your organisation&apos;s stored evidence. Connect a repository to see them.</div>}
 
         {/* ══ EXCEPTIONS ══ */}
         {tab === "exceptions" && (

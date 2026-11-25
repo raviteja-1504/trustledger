@@ -86,6 +86,8 @@ export interface FileResult {
   risk_indicators: string[];
   indicators?: FileIndicator[];
   attested: boolean;
+  /** The newest attestation of this file in this scan, for checking its signature (/api/attest/verify). */
+  attestation_id?: string;
   content?: string;
   attribution?: AttributionResult;
   // Remediation guidance for the vulnerability ids present in `indicators`, one per id.

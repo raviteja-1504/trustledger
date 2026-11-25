@@ -37,6 +37,11 @@ jest.mock("@/lib/useRealData", () => ({
       risk_accepted: true, owner_email: "admin@acme.test", due_date: null, remediation: null, status: "open", created_at: "2026-09-01T00:00:00Z",
     }] };
     if (url === "/api/team") return { members: [{ email: "admin@acme.test" }] };
+    if (url.startsWith("/api/evidence/gaps")) return {
+      framework_id: "soc2", mapping_version: "1.0", scope_disclaimer: "Technical evidence only.",
+      summary: { controls: 1, with_gaps: 1, unowned: 1, untracked_gaps: 1, overdue: 0, resolved_but_gap_remains: 0 },
+      controls: [{ control_id: "CC8.1", control_name: "Changes are reviewed", status: "missing", owner: null, gaps: [{ evidence_type: "pr_approval", kind: "missing" }], remediations: [], flags: ["no_owner", "gap_untracked"] }],
+    };
     throw new Error(`unexpected ${url}`);
   }),
 }));
@@ -123,5 +128,22 @@ describe("Compliance evidence page", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Exceptions/ }));
     expect(await screen.findByText("Old transparency exception")).toBeInTheDocument();
     expect(screen.getByText(/control no longer in the AI governance set/)).toBeInTheDocument();
+  });
+});
+
+describe("Compliance page: owners and gaps tab", () => {
+  it("opens from the tab bar and loads the selected framework's report", async () => {
+    render(<CompliancePage />);
+    fireEvent.click(await screen.findByRole("tab", { name: "Owners & gaps" }));
+    expect(await screen.findByRole("article", { name: "Control CC8.1" })).toBeInTheDocument();
+    expect(calls).toContain("/api/evidence/gaps?framework=soc2");
+    expect(screen.getByRole("note")).toHaveTextContent("not a compliance verdict");
+    expect(screen.getByText("Gap nobody is working on")).toBeInTheDocument();
+  });
+
+  it("is not fetched until the tab is opened", async () => {
+    render(<CompliancePage />);
+    await screen.findByRole("tab", { name: "Owners & gaps" });
+    expect(calls.some(c => c.startsWith("/api/evidence/gaps"))).toBe(false);
   });
 });

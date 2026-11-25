@@ -17,6 +17,7 @@ import {
 } from "@/lib/auditEvents";
 import type { ChainVerification } from "@/lib/audit";
 import { LoadingBlock } from "@/components/Loading";
+import AuditCheckpoints from "@/components/AuditCheckpoints";
 
 const PAGE_SIZE = 200;
 const PERIODS = [["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last 12 months"], ["all", "All time"]] as const;
@@ -187,6 +188,8 @@ export default function AuditPage() {
             )}
           </section>
         )}
+
+        {!demo && <AuditCheckpoints />}
 
         {meta && (
           <section aria-label="Summary" className="grid grid-cols-2 sm:grid-cols-4 gap-3">

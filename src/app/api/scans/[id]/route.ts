@@ -208,12 +208,20 @@ export async function GET(
 
   const { data: attests } = await allRows((from, to) => db
     .from("attestations")
-    .select("file_path")
+    .select("id, file_path, created_at")
     .eq("scan_id", params.id)
     .order("file_path", { ascending: true })
+    .order("id", { ascending: true })
     .range(from, to));
 
   const attestedSet = new Set(attests.map(a => a.file_path));
+  // The newest attestation of each file: the page's "check signature" asks the verify endpoint about it.
+  const attestationIds = new Map<string, { id: string; at: string }>();
+  for (const a of attests as Array<{ id: string; file_path: string; created_at: string | null }>) {
+    const at = a.created_at ?? "";
+    const seen = attestationIds.get(a.file_path);
+    if (!seen || at >= seen.at) attestationIds.set(a.file_path, { id: a.id, at });
+  }
 
   // Files whose stored findings depend on other files (a flow crosses them, a backlink, a folded duplicate):
   // they must not be re-analysed in isolation below.
@@ -292,6 +300,7 @@ export async function GET(
         // and this comes free from the same reanalyze() call.
         attribution:     freshAttribution ?? (f.attribution as AttributionResult | null) ?? undefined,
         attested:        attestedSet.has(f.file_path),
+        attestation_id:  attestationIds.get(f.file_path)?.id,
         content:         content ?? undefined,
       };
     }));

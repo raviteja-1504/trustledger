@@ -86,3 +86,13 @@ describe("Audit Trail page", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Problem at entry #3. Its contents no longer match its hash");
   });
 });
+
+describe("Audit Trail page: checkpoints", () => {
+  it("offers the checkpoint check beside the chain check, and fetches nothing for it until asked", async () => {
+    render(<AuditPage />);
+    expect(await screen.findByRole("button", { name: "Check against checkpoints" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check the whole log" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Record a checkpoint" })).toBeInTheDocument();
+    expect(urls.some(u => u.includes("checkpoints"))).toBe(false);
+  });
+});
