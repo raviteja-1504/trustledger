@@ -127,3 +127,35 @@ describe("policy lib", () => {
     expect(result.pass).toBe(true);
   });
 });
+
+describe("evaluatePolicy: structured fields for a short display", () => {
+  const DETAIL = "Tainted expression 'id' is passed to getProfile(...), which reaches db.query(...) at apps/javascript/query.js:3 [crosses file boundary]";
+  const run = (indicators: unknown[]) => evaluatePolicy(
+    { ...DEFAULT_POLICY, block_on_critical: true } as never,
+    [{ file_path: "apps/javascript/routes.js", risk_score: "CRITICAL", attested: false, ai_percentage: 0.1, indicators }] as never,
+    new Set(),
+  ).violations[0];
+
+  it("carries the finding's title and line next to CWE and confidence", () => {
+    const v = run([{ id: "sql-injection", label: "SQL Injection", severity: "critical", detail: DETAIL, cwe: "CWE-89", confidence: 95, line: 12 }]);
+    expect(v).toMatchObject({ indicator_id: "sql-injection", title: "SQL Injection", line: 12, cwe: "CWE-89", confidence: 95 });
+  });
+
+  it("leaves the long reason exactly as it was, because alerts and the GitHub check still show it", () => {
+    const v = run([{ id: "sql-injection", label: "SQL Injection", severity: "critical", detail: DETAIL, cwe: "CWE-89", confidence: 95, line: 12 }]);
+    expect(v.reason).toBe(`SQL Injection — ${DETAIL} (CWE-89 · 95% confidence)`);
+  });
+
+  it("has no title or line when no finding drove the violation", () => {
+    const v = run([]);
+    expect(v.title).toBeUndefined();
+    expect(v.line).toBeUndefined();
+    expect(v.reason).toMatch(/^CRITICAL risk — requires/);
+  });
+
+  it("omits the line when the finding has none", () => {
+    const v = run([{ id: "x", label: "Thing", severity: "critical" }]);
+    expect(v.title).toBe("Thing");
+    expect("line" in v).toBe(false);
+  });
+});

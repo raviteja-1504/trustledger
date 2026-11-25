@@ -1025,7 +1025,7 @@ function PolicyGate({ result, policy }: { result: PolicyResult; policy: OrgPolic
   };
 
   return (
-    <div className={`rounded-2xl border overflow-hidden ${
+    <div role="region" aria-label="Policy result" className={`rounded-2xl border overflow-hidden ${
       result.pass
         ? "border-emerald-200 bg-emerald-50/50"
         : result.gated
@@ -1077,20 +1077,52 @@ function PolicyGate({ result, policy }: { result: PolicyResult; policy: OrgPolic
 
       {/* Violations */}
       {result.violations.length > 0 && (
-        <div className="border-t border-current/10 px-5 py-3 space-y-1.5"
+        <div className="border-t border-current/10 px-5 py-3 space-y-2"
           style={{ borderColor: result.gated ? "#fecaca" : "#fde68a" }}>
-          {result.violations.map((v, i) => (
-            <div key={i} className="flex items-start gap-2.5">
-              <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${sevDot[v.severity] ?? "bg-gray-400"}`} />
-              <p className="text-xs text-gray-700 leading-relaxed">
-                <span className={`text-[10px] font-bold px-1.5 py-px rounded ring-1 mr-1.5 ${sevColors[v.severity] ?? ""}`}>
-                  {v.severity.toUpperCase()}
-                </span>
-                <code className="font-mono text-gray-600 mr-1">{v.file.split("/").pop()}</code>
-                {v.reason}
-              </p>
-            </div>
-          ))}
+          {result.violations.map((v, i) => {
+            const name = v.file.split("/").pop();
+            if (!v.title) {
+              // No specific finding behind it (a risk-level or AI-share rule): the rule's own short sentence says it all.
+              return (
+                <div key={i} className="flex items-start gap-2.5">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${sevDot[v.severity] ?? "bg-gray-400"}`} />
+                  <p className="text-xs text-gray-700 leading-relaxed">
+                    <span className={`text-[10px] font-bold px-1.5 py-px rounded ring-1 mr-1.5 ${sevColors[v.severity] ?? ""}`}>
+                      {v.severity.toUpperCase()}
+                    </span>
+                    <code className="font-mono text-gray-600 mr-1">{name}</code>
+                    {v.reason}
+                  </p>
+                </div>
+              );
+            }
+            // A real finding: what it is, where, and how sure we are. The data-flow story lives in the file's own view.
+            const dir = v.file.includes("/") ? v.file.slice(0, v.file.lastIndexOf("/")) : "";
+            const meta = v.indicator_id ? signalMeta(v.indicator_id, v.title) : null;
+            const meaning = meta?.desc && meta.desc !== NO_CURATED_DESC ? meta.desc : null;
+            const chip = "text-[10px] font-semibold text-gray-600 bg-white ring-1 ring-gray-200 rounded-full px-2 py-0.5 whitespace-nowrap";
+            return (
+              <div key={i} data-testid="policy-violation" className="rounded-xl border border-black/5 bg-white/70 px-3.5 py-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className={`text-[10px] font-bold px-1.5 py-px rounded ring-1 ${sevColors[v.severity] ?? ""}`}>{v.severity.toUpperCase()}</span>
+                  <span className="text-sm font-bold text-gray-900">{meta?.label ?? v.title}</span>
+                  <span className="ml-auto flex items-center gap-1.5">
+                    {v.cwe && <span className={chip}>{v.cwe}</span>}
+                    {v.confidence != null && <span className={chip}>{v.confidence}% confidence</span>}
+                  </span>
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+                  <button type="button" title="Open this file in the review"
+                    onClick={() => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { file: v.file, line: v.line } }))}
+                    className="font-mono font-semibold text-indigo-600 hover:underline">
+                    {name}{typeof v.line === "number" ? `:${v.line}` : ""}
+                  </button>
+                  {dir && <span className="font-mono text-gray-400 truncate max-w-full" title={v.file}>{dir}</span>}
+                </div>
+                {meaning && <p className="mt-1 text-xs text-gray-600 leading-relaxed">{meaning}</p>}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

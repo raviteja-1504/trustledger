@@ -223,3 +223,51 @@ describe("PR page: signature check on attested files", () => {
     expect(screen.queryByRole("button", { name: "Check signature" })).not.toBeInTheDocument();
   });
 });
+
+describe("PR page: policy violations read as short cards", () => {
+  const LONG = "Tainted expression 'id' is passed to getProfile(...), which reaches db.query(...) at apps/javascript/query.js:3 [crosses file boundary via \"getProfile\" imported from ./profileService (getProfile -> rawLookup)] — real data-flow match across files, not a line-pattern guess";
+  const policyBox = () => screen.getByRole("region", { name: "Policy result" });
+
+  it("a cross-file SQL injection shows its name, file and line, CWE and confidence, and not the data-flow story", async () => {
+    scan.files = [file("apps/javascript/routes.js", "CRITICAL", [ind("sql-injection", 12, "critical", { detail: LONG, cwe: "CWE-89", confidence: 95 })])] as never;
+    await renderPage();
+    const card = within(policyBox()).getByTestId("policy-violation");
+    expect(card).toHaveTextContent("CRITICAL");
+    expect(card).toHaveTextContent("SQL Injection");
+    expect(within(card).getByRole("button", { name: "routes.js:12" })).toBeInTheDocument();
+    expect(card).toHaveTextContent("apps/javascript");
+    expect(card).toHaveTextContent("CWE-89");
+    expect(card).toHaveTextContent("95% confidence");
+    expect(card).toHaveTextContent("Query built with string interpolation");          // what it means, in a sentence
+    expect(policyBox().textContent).not.toMatch(/Tainted expression|crosses file boundary|real data-flow match/);
+  });
+
+  it("the file name opens that file at that line", async () => {
+    scan.files = [file("apps/javascript/routes.js", "CRITICAL", [ind("sql-injection", 12, "critical", { cwe: "CWE-89", confidence: 95 })])] as never;
+    const opened: unknown[] = [];
+    const listener = (e: Event) => opened.push((e as CustomEvent).detail);
+    window.addEventListener("tl:open-file", listener);
+    try {
+      await renderPage();
+      fireEvent.click(within(policyBox()).getByRole("button", { name: "routes.js:12" }));
+      expect(opened).toEqual([{ file: "apps/javascript/routes.js", line: 12 }]);
+    } finally { window.removeEventListener("tl:open-file", listener); }
+  });
+
+  it("omits what it doesn't know: no confidence chip without a confidence, no line without a line", async () => {
+    const bare = { id: "sql-injection", label: "sql-injection", severity: "critical", fingerprint: "fp-bare", introduced: true, lifecycle_status: "new" };   // no CWE, confidence or line
+    scan.files = [file("src/db.ts", "CRITICAL", [bare as unknown as ReturnType<typeof ind>])] as never;
+    await renderPage();
+    const card = within(policyBox()).getByTestId("policy-violation");
+    expect(card).not.toHaveTextContent("confidence");
+    expect(card).not.toHaveTextContent("CWE");
+    expect(within(card).getByRole("button", { name: "db.ts" })).toBeInTheDocument();
+  });
+
+  it("a rule with no specific finding behind it keeps its one-line wording", async () => {
+    scan.files = [file("src/plain.ts", "CRITICAL", [])] as never;
+    await renderPage();
+    expect(within(policyBox()).queryByTestId("policy-violation")).not.toBeInTheDocument();
+    expect(policyBox()).toHaveTextContent(/plain\.ts\s*CRITICAL risk — requires \d+ attestation|CRITICAL.*plain\.ts.*CRITICAL risk/s);
+  });
+});

@@ -109,6 +109,9 @@ export interface PolicyViolation {
   indicator_id?:  string;
   cwe?:           string;
   confidence?:    number;
+  /** The finding's own name (e.g. "SQL Injection") and the line it is reported on in `file`, for a short display. */
+  title?:         string;
+  line?:          number;
 }
 
 export interface PolicyResult {
@@ -121,7 +124,7 @@ export interface PolicyResult {
 
 interface FileIndicator {
   id: string; label: string; severity: string; detail?: string;
-  cwe?: string; confidence?: number; codeCategory?: string;
+  cwe?: string; confidence?: number; codeCategory?: string; line?: number;
 }
 
 const SEVERITY_RANK: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0, info: -1 };
@@ -142,7 +145,7 @@ function bestIndicatorFor(indicators: FileIndicator[] | undefined, minSeverity: 
   )[0];
 }
 
-function explainedReason(fallback: string, ind: FileIndicator | undefined): Pick<PolicyViolation, "reason" | "indicator_id" | "cwe" | "confidence"> {
+function explainedReason(fallback: string, ind: FileIndicator | undefined): Pick<PolicyViolation, "reason" | "indicator_id" | "cwe" | "confidence" | "title" | "line"> {
   if (!ind) return { reason: fallback };
   const parts = [ind.label];
   if (ind.detail) parts.push(ind.detail);
@@ -153,6 +156,7 @@ function explainedReason(fallback: string, ind: FileIndicator | undefined): Pick
   return {
     reason: suffix ? `${parts.join(" — ")} (${suffix})` : parts.join(" — "),
     indicator_id: ind.id, cwe: ind.cwe, confidence: ind.confidence,
+    title: ind.label, ...(typeof ind.line === "number" ? { line: ind.line } : {}),
   };
 }
 
