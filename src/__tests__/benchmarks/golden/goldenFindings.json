@@ -715,5 +715,28 @@
  "interprocedural/JAVA-05": [
   "XmlServlet.java:15 xxe <- -",
   "XmlServlet.java:18 xxe <- new InputSource(new StringReader(xml))"
+ ],
+ "interprocedural/CS-01": [
+  "CS-01.cs:13 sql-injection <- cmd"
+ ],
+ "interprocedural/CS-02": [],
+ "interprocedural/CS-03": [
+  "CS-03.cs:9 ssrf <- target"
+ ],
+ "interprocedural/CS-04": [
+  "CS-04.cs:10 command-injection <- \"/c echo \" + arg"
+ ],
+ "interprocedural/PHP-01": [
+  "PHP-01.php:12 sql-injection <- $query",
+  "PHP-01.php:6 sql-injection <- -"
+ ],
+ "interprocedural/PHP-02": [
+  "PHP-02.php:7 file-inclusion <- ($path)"
+ ],
+ "interprocedural/PHP-03": [
+  "PHP-03.php:11 command-injection <- $cmd"
+ ],
+ "interprocedural/PHP-04": [
+  "PHP-04.php:11 xss <- $html"
  ]
 }

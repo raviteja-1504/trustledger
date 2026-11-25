@@ -55,8 +55,9 @@ export function scoreCase(c: InterproceduralCase): CaseResult {
   const missing = best ? best.miss : atSink.length ? ["no trace (pattern rule)"] : ["no finding at the sink"];
   const detail = best ? (best.i.trace ?? []).map(s => `${s.kind}@${s.line}`).join(" > ") : atSink.map(i => i.id).join(",");
 
-  // safe twin: the source replaced by a constant
-  const twinCode = code.replace(c.source, c.constant);
+  // safe twin: replace ALL occurrences of the source expression (not just the first, which may be
+  // in a header comment in C# / PHP fixtures, leaving the actual code line untouched)
+  const twinCode = code.replaceAll(c.source, c.constant);
   const twinFlows = findings(c, twinCode).filter(i => i.trace?.length);
   return { id: c.id, outcome, twin: twinFlows.length ? "fp" : "clean", missing, detail };
 }
