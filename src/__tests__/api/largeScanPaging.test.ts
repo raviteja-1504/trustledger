@@ -168,7 +168,8 @@ describe(`a ${N}-file scan behind a ${PAGE_SIZE}-row response cap`, () => {
   it("Shadow AI sees every file's attribution, not the first 1000 rows of the scans", async () => {
     const files = db.client.from("scan_files") as unknown as { update: (p: unknown) => { eq: (c: string, v: unknown) => PromiseLike<unknown> } };
     await files.update({ attribution: { model: "claude", confidence: 0.9 } }).eq("scan_id", SCAN);
-    const { detections } = await loadShadowAi(db.client as never, "org-1", 30);
+    // the seed scans are dated 2026-10-24; a wide window keeps this paging test independent of today's date
+    const { detections } = await loadShadowAi(db.client as never, "org-1", 3650);
     expect(detections.filter(d => d.tier === "hint").length).toBe(N);
   });
 

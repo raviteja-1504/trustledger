@@ -120,4 +120,7 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   // Evidence routes insert a full EvidenceRecord row; org_id is always set in the evidenceRecordToRow() payload.
   { file: "src/app/api/evidence/records/route.ts", table: "evidence_log", op: "insert", keys: [], why: "payload-has-org" },
   { file: "src/app/api/evidence/[id]/route.ts", table: "evidence_log", op: "insert", keys: [], why: "payload-has-org" },
+  // attest/verify: att and src were each loaded with .eq("org_id", auth.org_id) first; these look up
+  // the file content hashes to compare them. The scan_id + file_path come from those org-scoped rows.
+  { file: "src/app/api/attest/verify/route.ts", table: "scan_files", op: "select", keys: ["scan_id","file_path"], count: 2, why: "parent-verified" },
 ];
