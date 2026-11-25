@@ -8,7 +8,8 @@
  *   - Control mapping (what evidence each control requires)
  *   - Scope disclaimer (what this evidence does and does NOT cover)
  *   - Evidence records collected in the period (metadata + content hashes)
- *   - Control coverage analysis (satisfied / partial / missing / expired)
+ *   - Control coverage analysis (satisfied / partial / missing / expired), counting only evidence that verifies
+ *   - Control owners, missing-evidence gaps and the remediation items that answer them (gap_report)
  *   - Audit trail entries for evidence collection in the period
  *   - Ed25519 cryptographic signature over the WHOLE package, as canonical JSON with keys sorted at every level
  *     (when configured). scripts/verify-evidence-export.cjs checks it, and re-derives every record's content hash.
@@ -33,7 +34,9 @@ import { verifyApiKey, requirePermission } from "../../_middleware";
 import { writeAuditLog, canonicalJson } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { rowToEvidenceRecord, checkIntegrity } from "@/lib/evidenceRecord";
-import { anchorStatus, isTrustedEvidence } from "@/lib/evidenceVerification";
+import { isTrustedEvidence } from "@/lib/evidenceVerification";
+import { loadAnchors, loadControlOwners, loadRemediations } from "@/lib/evidenceTracking";
+import { buildGapReport } from "@/lib/controlTracking";
 import {
   getFrameworkMapping,
   frameworkCoverageSummary,
@@ -87,15 +90,12 @@ export async function GET(req: NextRequest) {
   const now = new Date();
   // Each record's hash is recomputed here, and compared with the copy in the audit log, so the package reports
   // what is true now rather than a stored status. A record that fails neither counts toward a control.
-  const payloadsByResource = new Map<string, unknown[]>();
-  for (const a of auditRows ?? []) {
-    const rid = a["resource_id"];
-    if (typeof rid === "string") payloadsByResource.set(rid, [...(payloadsByResource.get(rid) ?? []), a["payload"]]);
-  }
-  const anchors = new Map<string, ReturnType<typeof anchorStatus>>(records.map(r => [
-    r.evidence_id, anchorStatus(payloadsByResource.get(r.evidence_id) ?? [], r.content_hash),
-  ]));
+  const anchors = await loadAnchors(db, auth.org_id, records);
   const coverage = frameworkCoverageSummary(fw.framework_id, records, now, { isTrusted: r => isTrustedEvidence(r, anchors.get(r.evidence_id)) });
+
+  // Who owns each control and how each gap is being answered (the remediation register, compliance_exceptions).
+  const [owners, remediations] = await Promise.all([loadControlOwners(db, auth.org_id, fw.framework_id), loadRemediations(db, auth.org_id, fw.framework_id)]);
+  const gapReport = buildGapReport(coverage!.controls, owners, remediations, now.toISOString().slice(0, 10));
 
   // Build the canonical export document.
   const pkg = {
@@ -150,6 +150,11 @@ export async function GET(req: NextRequest) {
       verification_status: r.verification_status,
       expiration_date:     r.expiration_date,
     })),
+
+    // ── Ownership, missing evidence and remediation ───────────────────────
+    // Per control: owner, the evidence still missing / expired / unverified, and the remediation items that answer it.
+    // A resolved remediation item does not close a gap; only verified, current evidence does.
+    gap_report: gapReport,
 
     // ── Coverage analysis ─────────────────────────────────────────────────
     coverage,
