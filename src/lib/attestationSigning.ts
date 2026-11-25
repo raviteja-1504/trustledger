@@ -198,14 +198,16 @@ export async function ensureSigningKey(
 // ── Verification (spec D) ─────────────────────────────────────────────────────
 
 export type VerifyResult =
-  | "valid"                 // signature OK and payload matches DB record
-  | "no_signature"          // pre-signing attestation (payload_json or signature is null)
-  | "invalid"               // signature present but cryptographically invalid
-  | "key_not_found"         // signing_key_id references a row that no longer exists
-  | "key_revoked"           // key was explicitly revoked (spec C: revocation)
-  | "key_retired"           // key was retired (historical attestations still valid: "key_retired" ≠ invalid)
-  | "payload_db_mismatch"   // signature OK but payload fields disagree with the DB record
-  | "payload_schema_invalid"; // payload_json is missing required fields or has wrong types
+  | "valid"                      // signature OK and payload matches DB record
+  | "no_signature"               // pre-signing attestation (payload_json or signature is null)
+  | "invalid"                    // signature present but cryptographically invalid
+  | "key_not_found"              // signing_key_id references a row that no longer exists
+  | "key_revoked"                // key was explicitly revoked (spec C: revocation)
+  | "key_retired"                // key was retired (historical attestations still valid: "key_retired" ≠ invalid)
+  | "payload_db_mismatch"        // signature OK but payload fields disagree with the DB record
+  | "payload_schema_invalid"     // payload_json is missing required fields or has wrong types
+  | "inherited_source_not_found" // the referenced source attestation was deleted or belongs to another org
+  | "inherited_content_changed"; // the file's content hash in this scan differs from the source scan
 
 // ── Payload schema validation ─────────────────────────────────────────────────
 
