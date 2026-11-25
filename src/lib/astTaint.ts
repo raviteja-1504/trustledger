@@ -4163,6 +4163,12 @@ export function scanAstTaint(
       const name = resolveKnownCallee(call.expression, localSinkFacts, localSinkResolver);
       const facts = name ? localSinkFacts.get(name) : undefined;
       if (!name || !facts) return;
+      // localSinkFacts is built exclusively from localFns, so the callee's body is always present in
+      // this file. The seededParams body walk (below in onVisit) will trace into it and report the
+      // actual sink location — which is more informative and fires for the same conditions. Emitting a
+      // call-site finding here would produce a duplicate at a different line, breaking parity between
+      // same-file and cross-file scans (the cross-file path only ever reports one finding per flow).
+      if (localFns.has(name)) return;
       for (const fact of facts) {
         if (fact.id === "type-confusion" && clientSide) continue;
         if (fact.id === "ssrf" && clientSide) continue;

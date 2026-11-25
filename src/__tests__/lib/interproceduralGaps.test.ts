@@ -482,12 +482,13 @@ app.get("/u", async (req, res) => {
 describe("[Context sensitivity / same-file precision] same callee, different call sites", () => {
   const js = (src: string) => scanAstTaint(src, "x.ts").map(f => `${f.id}@${f.line}`);
 
-  it("tainted call site fires at call site line AND at sink body line", () => {
+  it("tainted call site produces a body finding; safe call site produces none", () => {
     // `runQuery` sink is at line 3; the tainted call site is at line 6.
-    // With same-file call-site analysis the engine reports BOTH:
-    //   - line 6: call-site finding with the actual tainted argument visible (context-sensitive)
-    //   - line 3: body finding at the SQL concatenation inside the callee
-    // The safe call site (line 5) does NOT generate a line-5 finding.
+    // The seededParams body walk reports the actual sink location (line 3), giving one precise
+    // finding per vulnerability rather than duplicating it at the call site.  The separate
+    // call-site emission was removed to maintain parity with cross-file scans (which can only
+    // report one finding per flow, at the call site in the importing file).
+    // The safe call site (line 5) does NOT generate a finding.
     const result = js(`
 function runQuery(id: string) {
   return db.query("SELECT * FROM users WHERE id = " + id);
@@ -495,12 +496,12 @@ function runQuery(id: string) {
 app.get("/safe", (req, res) => runQuery("42"));
 app.get("/unsafe", (req, res) => runQuery(req.query.id as string));
 `);
-    expect(result).toContain("sql-injection@6");  // call-site attribution
     expect(result).toContain("sql-injection@3");  // body sink location
     expect(result).not.toContain("sql-injection@5"); // safe call site: no finding
+    expect(result).not.toContain("sql-injection@6"); // call-site duplicate suppressed
   });
 
-  it("two tainted call sites each fire a call-site finding", () => {
+  it("two tainted call sites produce one body finding (single vulnerability, single report)", () => {
     const result = js(`
 function runQuery(id: string) {
   return db.query("SELECT * FROM users WHERE id = " + id);
@@ -508,8 +509,10 @@ function runQuery(id: string) {
 app.get("/a", (req, res) => runQuery(req.query.id as string));
 app.get("/b", (req, res) => runQuery(req.query.id as string));
 `);
-    // at least 2 findings: one per call site (lines 5 and 6) plus the body finding (line 3)
-    expect(result.filter(r => r.startsWith("sql-injection")).length).toBeGreaterThanOrEqual(2);
+    // The seededParams body walk merges both call sites into one walk of the same function,
+    // producing one body finding at line 3. Cross-file parity: same count as cross-file scan.
+    expect(result.filter(r => r.startsWith("sql-injection")).length).toBe(1);
+    expect(result).toContain("sql-injection@3");
   });
 
   it("when ALL call sites are constant the engine proves safety (no finding)", () => {
