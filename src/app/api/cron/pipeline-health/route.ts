@@ -5,6 +5,8 @@
  *    "pipeline" alert — at most one per organisation per day, so a lasting problem doesn't flood the alerts list.
  *    Alerts go wherever the org's alert channels (Slack, email) already send.
  *  - Deletes ops_events older than 30 days (the Trace page's retention).
+ *  - Records a signed checkpoint of each organisation's audit chain when it has grown (lib/auditCheckpoint.ts), so
+ *    truncation or rewriting of the log can be detected later.
  *  - Applies each organisation's data-retention policy if it switched automatic enforcement on
  *    (lib/retention.ts: closed records and unattested scans only; never the audit log).
  *
@@ -19,11 +21,14 @@ import { logger } from "@/lib/logger";
 import { writeAuditLog } from "@/lib/audit";
 import { enforceRetention, normalizeRetention, totalDeleted } from "@/lib/retention";
 import { computeOrgScore, saveSnapshot } from "@/lib/governanceScoreLoader";
+import { createCheckpoint } from "@/lib/auditCheckpoint";
 
 export const maxDuration = 120;
 const RETENTION_DAYS = 30;
 /** Leave headroom inside maxDuration for the snapshots. */
 const SCORE_BUDGET_MS = 100_000;
+/** Checkpoints stop here so the Trust Score snapshots below still fit in maxDuration. */
+const CHECKPOINT_BUDGET_MS = 60_000;
 
 export async function GET(req: NextRequest) {
   if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -87,6 +92,23 @@ async function run() {
     }
   }
 
+  // Signed audit checkpoints. Skipped quietly without a signing key; one org failing doesn't stop the others.
+  let checkpointsCreated = 0, checkpointsRefused = 0;
+  for (const org of orgs ?? []) {
+    if (Date.now() - now > CHECKPOINT_BUDGET_MS) break;
+    try {
+      const r = await createCheckpoint(db, org.id, new Date(now));
+      if (r.created) checkpointsCreated++;
+      else if (r.reason === "verification_failed") {
+        checkpointsRefused++;
+        logger.error("Audit checkpoint refused: the audit log fails verification", { org_id: org.id, status: r.status });
+        await recordEvent({ kind: "audit.checkpoint_refused", org_id: org.id, message: `Audit log verification: ${r.status}`, data: { status: r.status } });
+      }
+    } catch (err) {
+      logger.error("Audit checkpoint failed for org", { org_id: org.id, detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   const cutoff = new Date(now - RETENTION_DAYS * 86400_000).toISOString();
   const { error: purgeErr } = await db.from("ops_events").delete().lt("created_at", cutoff);
 
@@ -99,6 +121,6 @@ async function run() {
     catch (err) { logger.error("Trust Score snapshot failed for org", { org_id: org.id, detail: err instanceof Error ? err.message : String(err) }); }
   }
 
-  logger.info("Pipeline health check finished", { orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, purged_before: cutoff, purge_error: purgeErr?.message, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted, scores_saved: scoresSaved });
-  return NextResponse.json({ ok: true, orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted, scores_saved: scoresSaved });
+  logger.info("Pipeline health check finished", { orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, purged_before: cutoff, purge_error: purgeErr?.message, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted, scores_saved: scoresSaved, checkpoints_created: checkpointsCreated, checkpoints_refused: checkpointsRefused });
+  return NextResponse.json({ ok: true, orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted, scores_saved: scoresSaved, checkpoints_created: checkpointsCreated, checkpoints_refused: checkpointsRefused });
 }

@@ -30,7 +30,7 @@ const KIND_LABEL: Record<string, string> = {
   "scan.files_fetched": "Files fetched from GitHub", "scan.completed": "Scan completed", "scan.failed": "Scan failed",
   "scan.skipped": "Skipped (already scanned)", "scan.superseded": "Superseded by a newer push",
   "checkrun.updated": "Check run updated", "checkrun.failed": "Check run update failed",
-  "api.error": "Request failed", "pipeline.stuck": "Pipeline alert raised",
+  "api.error": "Request failed", "pipeline.stuck": "Pipeline alert raised", "audit.checkpoint_refused": "Audit checkpoint refused (log fails verification)",
 };
 const STATUS_STYLE: Record<string, string> = {
   completed: "bg-emerald-50 text-emerald-700 ring-emerald-200", failed: "bg-rose-50 text-rose-700 ring-rose-200",

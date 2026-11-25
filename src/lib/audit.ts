@@ -196,11 +196,8 @@ export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
 const PAGE = 1000;
 const MAX_ROWS = 200_000;
 
-/** Verify the integrity of the audit log chain for an org (every entry, paged past the 1000-row cap). */
-export async function verifyAuditChain(
-  db: SupabaseClient<Database>,
-  org_id: string,
-): Promise<ChainVerification> {
+/** Every audit entry of an org in id order, paged past the 1000-row cap. `complete` is false when a read failed part-way. */
+export async function loadAuditRows(db: SupabaseClient<Database>, org_id: string): Promise<{ rows: ChainRow[]; complete: boolean }> {
   const rows: ChainRow[] = [];
   try {
     for (let from = 0; from < MAX_ROWS; from += PAGE) {
@@ -215,6 +212,18 @@ export async function verifyAuditChain(
       if (!data || data.length < PAGE) break;
     }
   } catch {
+    return { rows, complete: false };
+  }
+  return { rows, complete: true };
+}
+
+/** Verify the integrity of the audit log chain for an org (every entry, paged past the 1000-row cap). */
+export async function verifyAuditChain(
+  db: SupabaseClient<Database>,
+  org_id: string,
+): Promise<ChainVerification> {
+  const { rows, complete } = await loadAuditRows(db, org_id);
+  if (!complete) {
     return {
       status: "INCOMPLETE",
       valid: false,

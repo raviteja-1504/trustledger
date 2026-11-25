@@ -15,7 +15,7 @@ export type OpsEventKind =
   | "scan.files_fetched" | "scan.completed" | "scan.failed" | "scan.dep_invalidation"
   | "checkrun.updated" | "checkrun.failed"
   | "api.error"
-  | "pipeline.stuck";
+  | "pipeline.stuck" | "audit.checkpoint_refused";
 
 export interface OpsEvent {
   kind: OpsEventKind;
@@ -40,7 +40,7 @@ export async function recordEvent(e: OpsEvent): Promise<void> {
   const row = {
     trace_id:    e.trace_id ?? t?.trace_id ?? newTraceId(),
     kind:        e.kind,
-    level:       e.level ?? (e.kind.endsWith("failed") || e.kind === "api.error" ? "error" : e.kind === "pipeline.stuck" ? "warn" : "info"),
+    level:       e.level ?? (e.kind.endsWith("failed") || e.kind === "api.error" ? "error" : e.kind === "pipeline.stuck" || e.kind === "audit.checkpoint_refused" ? "warn" : "info"),
     message:     e.message ?? null,
     org_id:      validUuid(e.org_id ?? t?.org_id),
     scan_id:     validUuid(e.scan_id ?? t?.scan_id),

@@ -123,4 +123,7 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   // attest/verify: att and src were each loaded with .eq("org_id", auth.org_id) first; these look up
   // the file content hashes to compare them. The scan_id + file_path come from those org-scoped rows.
   { file: "src/app/api/attest/verify/route.ts", table: "scan_files", op: "select", keys: ["scan_id","file_path"], count: 2, why: "parent-verified" },
+  // Audit checkpoints: the signing key is looked up by the id stored in an org-scoped checkpoint row (or the platform key
+  // this process just loaded). signing_keys holds public keys only, shared across orgs by design.
+  { file: "src/lib/auditCheckpoint.ts", table: "signing_keys", op: "select", keys: ["id"], why: "parent-verified" },
 ];
