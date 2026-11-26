@@ -4,6 +4,7 @@
  * Called from scan completion and violation SLA breach detection.
  */
 import { isPublicHttpUrl } from "./outboundUrl";
+import { safeFetch } from "./safeFetch";
 
 export interface AlertPayload {
   alert_id:   string;
@@ -94,10 +95,10 @@ export async function sendSlackAlert(
   ];
 
   try {
-    const res = await fetch(webhookUrl, {
+    // safeFetch: the address is vetted where the connection is made (no DNS rebinding) and a redirect is never followed
+    const res = await safeFetch(webhookUrl, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      redirect: "manual",   // never follow a redirect off the vetted public URL (see outboundUrl.ts)
       body:    JSON.stringify({
         text:        `${SEV_EMOJI[alert.severity]} ${alert.severity}: ${alert.title}`,
         attachments: [{ color: SEV_COLOR[alert.severity], blocks }],
@@ -232,10 +233,9 @@ export async function sendTeamsAlert(webhookUrl: string, alert: AlertPayload): P
   };
 
   try {
-    const res = await fetch(webhookUrl, {
+    const res = await safeFetch(webhookUrl, {
       method:  "POST",
       headers: { "Content-Type":"application/json" },
-      redirect: "manual",   // never follow a redirect off the vetted public URL (see outboundUrl.ts)
       body:    JSON.stringify(card),
     });
     return res.ok;

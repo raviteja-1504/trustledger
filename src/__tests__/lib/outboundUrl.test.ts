@@ -3,10 +3,22 @@
  *
  * The server fetches webhook / alert URLs that users type in. Found by the engine's own self-scan once it understood
  * Fetch-API request bodies: the test-webhook endpoint could be pointed at cloud metadata or localhost.
+ *
+ * Three layers: isPublicHttpUrl vets the URL's host name (here); the callers send only through safeFetch and treat what
+ * comes back correctly (here, with safeFetch mocked); safeFetch itself vets the address the connection really goes to and
+ * never follows a redirect (lib/safeFetch.test.ts, against real servers).
  */
 import { isPublicHttpUrl } from "@/lib/outboundUrl";
 import { deliverWebhook } from "@/lib/outboundWebhook";
 import { sendSlackAlert, sendTeamsAlert, type AlertPayload } from "@/lib/alertDelivery";
+import { safeFetch, OutboundBlockedError } from "@/lib/safeFetch";
+
+jest.mock("@/lib/safeFetch", () => {
+  const actual = jest.requireActual("@/lib/safeFetch");
+  return { ...actual, safeFetch: jest.fn() };
+});
+const safeFetchMock = safeFetch as jest.MockedFunction<typeof safeFetch>;
+const reply = (status: number) => ({ ok: status >= 200 && status < 300, status }) as unknown as Response;
 
 describe("isPublicHttpUrl", () => {
   it.each([
@@ -30,48 +42,53 @@ describe("isPublicHttpUrl", () => {
 });
 
 describe("delivery refuses private destinations without making a request", () => {
-  const fetchMock = jest.fn();
-  beforeEach(() => { fetchMock.mockReset(); fetchMock.mockResolvedValue({ ok: true, status: 200 }); global.fetch = fetchMock as unknown as typeof fetch; });
+  beforeEach(() => { safeFetchMock.mockReset(); safeFetchMock.mockResolvedValue(reply(200)); });
   const alert: AlertPayload = { alert_id: "a1", severity: "P1", title: "t", body: "b", org_name: "Acme", app_url: "https://app.example.com" };
   const event = { id: "e1", type: "scan.completed", created_at: "2026-11-12T00:00:00Z", data: {} } as unknown as Parameters<typeof deliverWebhook>[1];
 
   it("a webhook to cloud metadata is not sent, and says why", async () => {
     const r = await deliverWebhook({ url: "http://169.254.169.254/latest/meta-data/", events: ["scan.completed"], enabled: true } as Parameters<typeof deliverWebhook>[0], event);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(safeFetchMock).not.toHaveBeenCalled();
     expect(r).toMatchObject({ success: false, error: "webhook_url_not_allowed" });
   });
-  it("a webhook to a public host is sent", async () => {
+  it("a webhook to a public host is sent, through safeFetch", async () => {
     const r = await deliverWebhook({ url: "https://hooks.example.com/x", events: ["scan.completed"], enabled: true } as Parameters<typeof deliverWebhook>[0], event);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(safeFetchMock).toHaveBeenCalledTimes(1);
+    expect(safeFetchMock.mock.calls[0][0]).toBe("https://hooks.example.com/x");
+    expect(safeFetchMock.mock.calls[0][1]).toMatchObject({ method: "POST", headers: expect.objectContaining({ "X-TrustLedger-Event": "scan.completed" }) });
     expect(r.success).toBe(true);
   });
   it("Slack and Teams alerts to a private URL are not sent", async () => {
     expect(await sendSlackAlert("http://localhost:8080/hook", alert)).toBe(false);
     expect(await sendTeamsAlert("http://10.1.2.3/hook", alert)).toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(safeFetchMock).not.toHaveBeenCalled();
   });
 });
 
-describe("delivery never follows a redirect off the vetted URL", () => {
-  // isPublicHttpUrl() only vets the URL typed in. fetch() follows redirects by default, so a public host answering
-  // 302 -> http://169.254.169.254/ would reach cloud metadata unless every sender asks for redirect: "manual".
-  const fetchMock = jest.fn();
-  beforeEach(() => { fetchMock.mockReset(); fetchMock.mockResolvedValue({ ok: false, status: 302 }); global.fetch = fetchMock as unknown as typeof fetch; });
+describe("what the callers do with the answer", () => {
+  beforeEach(() => safeFetchMock.mockReset());
   const alert: AlertPayload = { alert_id: "a1", severity: "P1", title: "t", body: "b", org_name: "Acme", app_url: "https://app.example.com" };
   const event = { id: "e1", type: "scan.completed", created_at: "2026-11-12T00:00:00Z", data: {} } as unknown as Parameters<typeof deliverWebhook>[1];
+  const hook = { url: "https://hooks.example.com/x", events: ["scan.completed"], enabled: true } as Parameters<typeof deliverWebhook>[0];
 
-  it("a webhook is sent with redirect: manual, and a 302 reply is a failed delivery", async () => {
-    const r = await deliverWebhook({ url: "https://hooks.example.com/x", events: ["scan.completed"], enabled: true } as Parameters<typeof deliverWebhook>[0], event);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
-    expect(r).toMatchObject({ success: false, status_code: 302 });
-  });
-  it("a Slack alert is sent with redirect: manual, and a 302 reply is not a success", async () => {
+  it("a 302 reply (a redirect safeFetch did not follow) is a failed delivery, not a success", async () => {
+    safeFetchMock.mockResolvedValue(reply(302));
+    expect(await deliverWebhook(hook, event)).toMatchObject({ success: false, status_code: 302 });
     expect(await sendSlackAlert("https://hooks.example.com/slack", alert)).toBe(false);
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
-  });
-  it("a Teams alert is sent with redirect: manual, and a 302 reply is not a success", async () => {
     expect(await sendTeamsAlert("https://hooks.example.com/teams", alert)).toBe(false);
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("an address that resolves to a private range is reported as a failed delivery, never thrown", async () => {
+    safeFetchMock.mockRejectedValue(new OutboundBlockedError("address_not_allowed", "hooks.example.com resolves to a private address (10.0.0.9), so the request was not sent"));
+    expect(await deliverWebhook(hook, event)).toMatchObject({ success: false, status_code: null, error: expect.stringContaining("private address") });
+    expect(await sendSlackAlert("https://hooks.example.com/slack", alert)).toBe(false);
+    expect(await sendTeamsAlert("https://hooks.example.com/teams", alert)).toBe(false);
+  });
+
+  it("a 2xx reply is a success", async () => {
+    safeFetchMock.mockResolvedValue(reply(204));
+    expect(await deliverWebhook(hook, event)).toMatchObject({ success: true, status_code: 204 });
+    expect(await sendSlackAlert("https://hooks.example.com/slack", alert)).toBe(true);
+    expect(await sendTeamsAlert("https://hooks.example.com/teams", alert)).toBe(true);
   });
 });

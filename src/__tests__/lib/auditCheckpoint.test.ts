@@ -12,6 +12,11 @@ import {
   buildCheckpointPayload, signCheckpoint, verifyCheckpointSignature, verifyCheckpointedChain, createCheckpoint,
   verifyOrgCheckpoints, exportAuditBundle, type CheckpointKey, type SignedCheckpoint,
 } from "@/lib/auditCheckpoint";
+import { safeFetch, OutboundBlockedError } from "@/lib/safeFetch";
+
+// The sink is called through safeFetch (which vets the address and never follows redirects: lib/safeFetch.test.ts)
+jest.mock("@/lib/safeFetch", () => ({ ...jest.requireActual("@/lib/safeFetch"), safeFetch: jest.fn() }));
+const safeFetchMock = safeFetch as jest.MockedFunction<typeof safeFetch>;
 
 const ORG = "org-1";
 const T0 = Date.parse("2026-11-01T00:00:00.000Z");
@@ -217,31 +222,47 @@ describe("createCheckpoint (database-backed)", () => {
     expect(await createCheckpoint(fakeSupabase({ audit_log: [], audit_checkpoints: [], signing_keys: [] }).client as never, ORG)).toEqual({ created: false, reason: "no_entries" });
   });
 
-  it("pushes the checkpoint to the external sink when one is configured, and never follows redirects", async () => {
+  it("pushes the checkpoint to the external sink when one is configured, through safeFetch", async () => {
     const db = setup(3);
     process.env.AUDIT_CHECKPOINT_SINK_URL = "https://sink.example.com/checkpoints";
     process.env.AUDIT_CHECKPOINT_SINK_TOKEN = "tok";
-    const realFetch = global.fetch;
-    const fetchMock = jest.fn(async () => new Response("ok", { status: 200 }));
-    global.fetch = fetchMock as unknown as typeof fetch;
-    try {
-      const r = await createCheckpoint(db.client as never, ORG);
-      expect(r).toMatchObject({ created: true, external: "delivered" });
-      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-      expect(url).toBe("https://sink.example.com/checkpoints");
-      expect(init).toMatchObject({ method: "POST", redirect: "manual" });
-      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
-      const body = JSON.parse(init.body as string);
-      expect(verifyCheckpointSignature(body.checkpoint, body.public_key.public_key_pem)).toBe(true);
-    } finally { global.fetch = realFetch; }
+    safeFetchMock.mockReset();
+    safeFetchMock.mockResolvedValue({ ok: true, status: 200 } as unknown as Response);
+    const r = await createCheckpoint(db.client as never, ORG);
+    expect(r).toMatchObject({ created: true, external: "delivered" });
+    const [url, init] = safeFetchMock.mock.calls[0];
+    expect(url).toBe("https://sink.example.com/checkpoints");
+    expect(init).toMatchObject({ method: "POST" });
+    expect((init!.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+    const body = JSON.parse(init!.body as string);
+    expect(verifyCheckpointSignature(body.checkpoint, body.public_key.public_key_pem)).toBe(true);
   });
 
-  it("a failing or private sink is reported, not thrown, and the checkpoint is still recorded", async () => {
+  it("a private sink URL is never called, and is reported as failed while the checkpoint is still recorded", async () => {
     const db = setup(3);
+    safeFetchMock.mockReset();
     process.env.AUDIT_CHECKPOINT_SINK_URL = "http://127.0.0.1/hook";
     const r = await createCheckpoint(db.client as never, ORG);
     expect(r).toMatchObject({ created: true, external: "failed" });
+    expect(safeFetchMock).not.toHaveBeenCalled();
     expect(table(db, "audit_checkpoints")).toHaveLength(1);
+  });
+
+  it("a sink whose name resolves to a private address is reported as failed, not thrown", async () => {
+    const db = setup(3);
+    process.env.AUDIT_CHECKPOINT_SINK_URL = "https://sink.example.com/checkpoints";
+    safeFetchMock.mockReset();
+    safeFetchMock.mockRejectedValue(new OutboundBlockedError("address_not_allowed", "sink.example.com resolves to a private address"));
+    expect(await createCheckpoint(db.client as never, ORG)).toMatchObject({ created: true, external: "failed" });
+    expect(table(db, "audit_checkpoints")).toHaveLength(1);
+  });
+
+  it("a sink that answers with an error status is reported as failed", async () => {
+    const db = setup(3);
+    process.env.AUDIT_CHECKPOINT_SINK_URL = "https://sink.example.com/checkpoints";
+    safeFetchMock.mockReset();
+    safeFetchMock.mockResolvedValue({ ok: false, status: 302 } as unknown as Response);   // e.g. a redirect safeFetch did not follow
+    expect(await createCheckpoint(db.client as never, ORG)).toMatchObject({ created: true, external: "failed" });
   });
 
   it("exports a bundle that verifies on its own", async () => {

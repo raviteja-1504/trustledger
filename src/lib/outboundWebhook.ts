@@ -14,6 +14,7 @@
 
 import crypto from "crypto";
 import { isPublicHttpUrl } from "./outboundUrl";
+import { safeFetch } from "./safeFetch";
 
 export type WebhookEventType =
   | "scan.completed"
@@ -88,15 +89,9 @@ export async function deliverWebhook(
 
   const start = Date.now();
   try {
-    const res = await fetch(config.url, {
-      method:  "POST",
-      headers,
-      body,
-      signal:  AbortSignal.timeout(10_000), // 10s timeout
-      // Never follow a redirect: isPublicHttpUrl() only vetted the URL typed in, and a public host could answer
-      // 302 -> http://169.254.169.254/ (cloud metadata) or a private address. A 3xx is reported as a failed delivery.
-      redirect: "manual",
-    });
+    // safeFetch vets the address the connection really goes to (no DNS rebinding), never follows a redirect (a 3xx is a
+    // failed delivery), and times out after 10 s.
+    const res = await safeFetch(config.url, { method: "POST", headers, body, timeoutMs: 10_000 });
     return {
       success:     res.ok,
       status_code: res.status,

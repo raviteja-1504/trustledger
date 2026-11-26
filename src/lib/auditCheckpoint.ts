@@ -22,6 +22,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { canonicalJson, checkAuditChain, loadAuditRows, type ChainRow, type ChainVerification } from "./audit";
 import { ensureSigningKey } from "./attestationSigning";
 import { isPublicHttpUrl } from "./outboundUrl";
+import { safeFetch } from "./safeFetch";
 
 export const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
@@ -249,9 +250,9 @@ export async function publishCheckpoint(cp: SignedCheckpoint, key: CheckpointKey
   if (!isPublicHttpUrl(url)) return "failed";
   const token = (process.env.AUDIT_CHECKPOINT_SINK_TOKEN ?? "").trim();
   try {
-    const res = await fetch(url, {
+    // safeFetch: the address is vetted where the connection is made (no DNS rebinding) and a redirect is never followed
+    const res = await safeFetch(url, {
       method: "POST",
-      redirect: "manual",   // never follow a redirect off the vetted public URL (see outboundUrl.ts)
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({ type: "trustledger.audit_checkpoint", checkpoint: cp, public_key: key }),
     });
