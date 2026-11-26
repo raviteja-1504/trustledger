@@ -1,5 +1,6 @@
 "use client";
 
+import { csvLine } from "@/lib/csv";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
@@ -650,7 +651,7 @@ export default function ViolationsView() {
         escalated.has(v.id) ? "YES" : "NO",
       ]),
     ];
-    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const csv = rows.map(csvLine).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type:"text/csv" }));
     a.download = `violations-${new Date().toISOString().split("T")[0]}.csv`;

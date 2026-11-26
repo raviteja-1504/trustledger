@@ -14,6 +14,7 @@
  * /api/secrets and /api/evidence/collect?overview=1. Panels whose data can't load say so instead of guessing.
  */
 
+import { csvLine } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
@@ -351,7 +352,7 @@ export default function DashboardPage() {
       ["Repository", "Trust Score", "Open CRITICAL", "Open HIGH", "High-risk reviewed %", "AI %", "Scans", "Last scan"],
       ...repoRows.map(r => [r.repo, r.score ?? "", r.openCritical ?? "", r.openHigh ?? r.highCrit, Math.round(r.review * 100), (r.ai * 100).toFixed(1), r.scans, r.lastScan ?? ""]),
     ];
-    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const csv = rows.map(csvLine).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     a.download = `trustledger-repositories-${new Date().toISOString().slice(0, 10)}.csv`;

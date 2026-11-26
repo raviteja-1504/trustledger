@@ -8,6 +8,7 @@
  * tool is a violation; style-based guesses are shown as hints. See lib/shadowAi.ts.
  */
 
+import { csvLine } from "@/lib/csv";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
@@ -135,7 +136,7 @@ export default function ShadowAIPage() {
   function exportCSV() {
     const rows = [["Tool", "Approval", "Evidence type", "Repository", "Location", "Developers", "Pull requests", "First seen", "Last seen", "Status", "Evidence"],
       ...detections.map(d => [d.tool_label, d.approval, d.tier, d.repo, d.location, d.developers.join(" "), d.pull_requests.join(" "), d.first_seen, d.last_seen, d.status, d.evidence.join("; ")])];
-    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const csv = rows.map(csvLine).join("\n");
     Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: `shadow-ai-${days}d.csv` }).click();
   }
 

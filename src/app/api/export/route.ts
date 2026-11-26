@@ -8,6 +8,7 @@
  * GET /api/export?type=attestations&format=csv
  */
 
+import { csvLine } from "@/lib/csv";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
@@ -17,15 +18,7 @@ type ExportType = "violations" | "audit" | "scans" | "attestations" | "secrets" 
 type ExportFormat = "csv" | "json";
 
 function toCSV(rows: Record<string, unknown>[], columns: string[]): string {
-  const header = columns.join(",");
-  const lines  = rows.map(row =>
-    columns.map(col => {
-      const val = row[col] ?? "";
-      const str = String(val).replace(/"/g, '""');
-      return str.includes(",") || str.includes("\n") || str.includes('"') ? `"${str}"` : str;
-    }).join(",")
-  );
-  return [header, ...lines].join("\n");
+  return [csvLine(columns), ...rows.map(row => csvLine(columns.map(col => row[col])))].join("\n");
 }
 
 export async function GET(req: NextRequest) {

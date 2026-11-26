@@ -6,6 +6,7 @@
  * mixed in, and the chain check is the server's (lib/audit.ts), which says plainly what it could and couldn't check.
  */
 
+import { csvCell } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
@@ -35,7 +36,7 @@ const utcTime = (iso: string) => { const d = new Date(iso); return `${pad(d.getU
 const utcDay = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
 const fmtDay = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
-const csvCell = (v: unknown) => { const s = String(v ?? ""); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+
 
 export default function AuditPage() {
   const { profile } = useAuth();

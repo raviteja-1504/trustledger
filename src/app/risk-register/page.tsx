@@ -8,6 +8,7 @@
  * data, so it matches the PR pages and the merge check; the page used to chain a cached dashboard payload, one scan
  * fetch per repository and a sync call, which was slow and could disagree with what had been attested.
  */
+import { csvCell } from "@/lib/csv";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
@@ -64,7 +65,7 @@ function ago(iso: string | null | undefined, now = Date.now()): string {
 }
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 /** A CSV cell: quoted, quotes doubled, and a leading = + - @ neutralised so a spreadsheet can't run it as a formula. */
-const csvCell = (v: unknown) => { const s = String(v ?? ""); return `"${(/^[=+\-@\t\r]/.test(s) ? `'${s}` : s).replace(/"/g, '""')}"`; };
+
 
 // ── Pieces ───────────────────────────────────────────────────────────────────
 

@@ -3,6 +3,7 @@
  * exception means, the reproducible auditor sample, and the CSV. No Node APIs here, so the Reports page can re-draw a
  * sample for any seed an auditor types, and save the CSV, from the register it already loaded.
  */
+import { csvCell } from "./csv";
 import type { BranchProtection } from "@/lib/branchProtection";
 
 export type ExceptionCode = "no_approval" | "approved_after_merge" | "stale_approval" | "not_scanned" | "unsigned_high_risk";
@@ -125,13 +126,6 @@ export function drawSample<R>(rows: readonly R[], size: number, seed: string): R
 
 const CSV_COLUMNS = ["repo", "pull_request", "title", "author", "merged_at", "merged_by", "approvers", "first_approval_at",
   "approved_merged_commit", "scan_id", "scanned_at", "scan_risk", "high_risk_files", "high_risk_signed_off", "exceptions", "url", "row_sha256"] as const;
-
-function csvCell(v: string | number | boolean | null | undefined): string {
-  const s = v == null ? "" : String(v);
-  // a leading = + - @ would be read as a formula by a spreadsheet: neutralise it
-  const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
-  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-}
 
 /** The register as CSV (one row per merged pull request), with each row's SHA-256. */
 export function registerToCsv(rows: readonly RegisterRow[]): string {

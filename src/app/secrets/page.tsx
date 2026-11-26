@@ -1,5 +1,6 @@
 "use client";
 
+import { csvLine } from "@/lib/csv";
 import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import InfoTooltip from "@/components/InfoTooltip";
@@ -174,7 +175,7 @@ export default function SecretsPage() {
         f.resolved_by ?? "",
       ]),
     ];
-    const csv = rows.map(r => r.map(c => `"${c}"`).join(",")).join("\n");
+    const csv = rows.map(csvLine).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     a.download = "trustledger-secrets.csv";

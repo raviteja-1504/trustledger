@@ -1,5 +1,6 @@
 "use client";
 
+import { csvLine } from "@/lib/csv";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
@@ -161,7 +162,7 @@ export default function SLAPage() {
       ["File","Repo","PR","Risk","Status","Assigned","SLA Deadline","Hours Overdue"],
       ...filtered.map(i => [i.file_path, i.repo ?? "", i.pr_number ?? "", i.risk_score, i.status, i.assigned_email ?? "", i.sla_deadline, Math.round(i.hours_overdue)]),
     ];
-    const blob = new Blob([rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n")], { type:"text/csv" });
+    const blob = new Blob([rows.map(csvLine).join("\n")], { type:"text/csv" });
     Object.assign(document.createElement("a"), { href:URL.createObjectURL(blob), download:"sla-dashboard.csv" }).click();
   }
 

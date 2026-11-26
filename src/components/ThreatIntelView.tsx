@@ -11,6 +11,7 @@
  * them into one upgrade per package.
  */
 
+import { csvLine } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
@@ -106,7 +107,7 @@ export default function ThreatIntelView() {
       ...shown.map(a => [PRIORITY_LABEL[a.priority], a.risk, a.cvss ?? "", a.package_name, a.version_used, a.ecosystem, a.all_advisories.map(x => x.id).join(" "),
         a.exploit_public ? "yes" : "no", a.reachable === true ? "yes" : a.reachable === false ? "no" : "unknown", a.dev_only ? "yes" : "no",
         a.transitive_only ? "yes" : "no", a.fix_version ?? "", a.repos.join(" ")])];
-    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const csv = rows.map(csvLine).join("\n");
     Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: "threat-intel.csv" }).click();
   }
 
