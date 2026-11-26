@@ -18,7 +18,7 @@ class FakeQuery implements PromiseLike<unknown> {
   private payload: unknown = undefined;
   private returning = false;
 
-  constructor(private rows: Row[], private writes: Array<{ table: string; op: string; payload?: unknown }>, private table: string, private cap: number | null = null) {}
+  constructor(private rows: Row[], private writes: Array<{ table: string; op: string; payload?: unknown }>, private table: string, private cap: number | null = null, private failure: unknown = null) {}
 
   select(_cols?: string, opts?: { count?: string; head?: boolean }) {
     if (this.write) { this.returning = true; return this; }
@@ -83,6 +83,7 @@ class FakeQuery implements PromiseLike<unknown> {
 
   private result() {
     if (this.write) return (this.applied ??= this.applyWrite());
+    if (this.failure) return { data: null, error: this.failure };
     let rows = this.rows.filter(r => this.filters.every(f => f(r)));
     if (this.orderBy.length > 0) {
       const cmp = (x: unknown, y: unknown) => typeof x === "number" && typeof y === "number" ? x - y : String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0;
@@ -127,9 +128,17 @@ class FakeQuery implements PromiseLike<unknown> {
  * `maxRows` mimics the project's PostgREST max_rows cap (every response silently truncated to that many rows),
  * so tests can prove a query pages through instead of quietly losing data. `rpc` returns canned results.
  */
-export function fakeSupabase(tables: Record<string, Row[]>, opts: { maxRows?: number; rpc?: Record<string, (args: Record<string, unknown>) => unknown> } = {}) {
+export function fakeSupabase(tables: Record<string, Row[]>, opts: {
+  maxRows?: number; rpc?: Record<string, (args: Record<string, unknown>) => unknown>;
+  /** Makes the n-th (1-based) read of a table fail: return an error object to fail it, or null/undefined to let it through. */
+  errorFor?: (table: string, call: number) => unknown;
+} = {}) {
   const writes: Array<{ table: string; op: string; payload?: unknown }> = [];
-  const from = (table: string) => new FakeQuery((tables[table] ??= []), writes, table, opts.maxRows ?? null);
+  const calls: Record<string, number> = {};
+  const from = (table: string) => {
+    const n = (calls[table] = (calls[table] ?? 0) + 1);
+    return new FakeQuery((tables[table] ??= []), writes, table, opts.maxRows ?? null, opts.errorFor?.(table, n) ?? null);
+  };
   return {
     writes,
     /** The live rows, for tests that need to read or change data between requests. */
