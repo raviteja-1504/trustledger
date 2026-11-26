@@ -30,9 +30,10 @@ import { csvLine } from "@/lib/csv";
 import crypto from "crypto";
 
 const EVENT_COLUMNS = "id, event_type, actor_email, resource_type, resource_id, payload, prev_hash, entry_hash, created_at";
-export const CSV_SIGNATURE_MARKER = "# --- signature ---";
-export const CSV_FORMAT = "trustledger-audit-csv/1";
-export const CSV_HEADER = ["id", "event_type", "actor_email", "resource_type", "resource_id", "payload", "prev_hash", "entry_hash", "created_at"] as const;
+// Not exported: a Next.js route file may only export its HTTP handlers and route config, or the build fails.
+const CSV_SIGNATURE_MARKER = "# --- signature ---";
+const CSV_FORMAT = "trustledger-audit-csv/1";
+const CSV_HEADER = ["id", "event_type", "actor_email", "resource_type", "resource_id", "payload", "prev_hash", "entry_hash", "created_at"] as const;
 
 /** A single line of text for a comment: no line breaks or control characters, so a name can't start a new line. */
 const CONTROL_CHARS = new RegExp("[" + String.fromCharCode(0) + "-" + String.fromCharCode(31, 127, 0x2028, 0x2029) + "]+", "g");
