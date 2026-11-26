@@ -50,14 +50,18 @@ export default function ControlGaps({ framework, frameworkName, color, members, 
   const [onlyMine, setOnlyMine] = useState(false);
   const [report, setReport] = useState<Report | null>(null);
   const [failed, setFailed] = useState(false);
+  const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
 
   const load = useCallback(async () => {
-    setFailed(false);
+    setFailed(false); setDenied(false);
     try { setReport(await authedFetch<Report>(`/api/evidence/gaps?framework=${encodeURIComponent(framework)}`)); }
-    catch { setFailed(true); }
+    catch (e) {
+      // 403: not a glitch to retry. The report lists owners and remediation, which needs the "Export data" permission.
+      if ((e as { status?: number } | null)?.status === 403) setDenied(true); else setFailed(true);
+    }
   }, [framework]);
   useEffect(() => { setReport(null); load(); }, [load]);
 
@@ -83,6 +87,7 @@ export default function ControlGaps({ framework, frameworkName, color, members, 
     setDownloading(false);
   }
 
+  if (denied) return <div role="alert" className="section-card p-5 text-sm text-gray-700">You don&apos;t have permission to view control owners and gaps. It needs the &ldquo;Export data&rdquo; permission: ask an admin of your organisation.</div>;
   if (failed) return <div className="section-card p-5 text-sm text-rose-700">Couldn&apos;t load owners and gaps. <button onClick={load} className="font-bold underline">Try again</button></div>;
   if (!report) return <div className="section-card h-48 animate-pulse" aria-label="Loading owners and gaps" />;
   const s = report.summary;

@@ -6,7 +6,7 @@
  * DELETE /api/evidence/controls?framework=soc2&control_id=CC8.1         → remove the owner
  *
  * The owner must be a member of the organisation. Every change is written to the audit log with the previous owner.
- * Writes need can_export_data, like the rest of the evidence routes.
+ * Reading and writing both need can_export_data: ownership is part of the signed evidence package (api/evidence/export).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
@@ -20,8 +20,12 @@ import { loadControlOwners } from "@/lib/evidenceTracking";
 const FRAMEWORKS = ["soc2", "iso27001", "pcidss", "aigov"];
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  // Who owns which control is part of the evidence package, so reading it needs the permission the package needs.
+  const permErr = await requirePermission(auth, "can_export_data");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
+  const { org_id } = auth;
   const fw = getFrameworkMapping(req.nextUrl.searchParams.get("framework") ?? "soc2");
   if (!fw) return NextResponse.json({ error: "unknown_framework", supported: FRAMEWORKS }, { status: 400 });
   try {

@@ -203,6 +203,15 @@ describe("ControlGaps", () => {
     expect(await screen.findByRole("article", { name: "Control CC8.1" })).toBeInTheDocument();
   });
 
+  it("explains a missing permission instead of offering a pointless retry", async () => {
+    handler = () => { throw Object.assign(new Error("forbidden"), { status: 403 }); };
+    gapsPanel();
+    expect(await screen.findByRole("alert")).toHaveTextContent("You don't have permission to view control owners and gaps");
+    expect(screen.getByRole("alert")).toHaveTextContent("Export data");
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+
   it("reloads for another framework", async () => {
     handler = () => twoControls();
     const { rerender } = gapsPanel();

@@ -7,17 +7,24 @@
  *
  * Complete evidence is not compliance: every control carries sufficient_alone: false and the framework's scope
  * disclaimer comes with the report.
+ *
+ * Needs can_export_data, like the evidence export it mirrors.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../_middleware";
+import { verifyApiKey, requirePermission } from "../../_middleware";
 import { safeError } from "@/lib/errors";
 import { getFrameworkMapping } from "@/lib/controlMapping";
 import { buildOrgGapReport } from "@/lib/evidenceTracking";
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  // The report carries each control's owner and remediation items, i.e. what the signed evidence package carries,
+  // so it needs the same permission (can_export_data).
+  const permErr = await requirePermission(auth, "can_export_data");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
+  const { org_id } = auth;
 
   const framework = req.nextUrl.searchParams.get("framework") ?? "soc2";
   if (!getFrameworkMapping(framework)) {

@@ -140,10 +140,16 @@ describe("control ownership routes", () => {
     expect(db.tables.control_owners).toHaveLength(0);
   });
 
-  it("needs the export permission to change ownership but not to read it", async () => {
+  it("needs the export permission to read ownership as well as to change it, and says nothing about who owns what without it", async () => {
+    await put({ framework: "soc2", control_id: "CC8.1", owner_email: "ana@acme.dev" });       // an owner exists to leak
     allowWrite = false;
-    expect((await json(await put({ framework: "soc2", control_id: "CC8.1", owner_email: "ana@acme.dev" }))).status).toBe(403);
+    expect((await json(await put({ framework: "soc2", control_id: "CC8.1", owner_email: "bo@acme.dev" }))).status).toBe(403);
     expect((await json(await deleteOwner(req("/api/evidence/controls?framework=soc2&control_id=CC8.1", { method: "DELETE" })))).status).toBe(403);
+    const read = await getControls(req("/api/evidence/controls?framework=soc2"));
+    expect(read.status).toBe(403);
+    expect(JSON.stringify(await read.json())).not.toMatch(/ana@acme|owner|CC8\.1/);
+    expect(db.tables.control_owners).toEqual([expect.objectContaining({ owner_email: "ana@acme.dev" })]);   // untouched
+    allowWrite = true;
     expect((await json(await getControls(req("/api/evidence/controls?framework=soc2")))).status).toBe(200);
   });
 
@@ -202,6 +208,17 @@ describe("gap report and signed export", () => {
 
   it("rejects an unknown framework", async () => {
     expect((await json(await getGaps(req("/api/evidence/gaps?framework=hipaa")))).body.error).toBe("unknown_framework");
+  });
+
+  it("the gap report needs the export permission too: without it, no owners, no remediation items, no controls", async () => {
+    await put({ framework: "soc2", control_id: "CC8.1", owner_email: "ana@acme.dev" });
+    db.tables.compliance_exceptions.push({ id: "e1", org_id: "org-1", framework_id: "soc2", control_id: "CC8.1", title: "Secret remediation plan", status: "open", owner_email: "ana@acme.dev", due_date: null, risk_accepted: false, remediation: null });
+    allowWrite = false;
+    const denied = await json(await getGaps(req("/api/evidence/gaps?framework=soc2")));
+    expect(denied.status).toBe(403);
+    expect(JSON.stringify(denied.body)).not.toMatch(/ana@acme|Secret remediation|CC8\.1|controls/);
+    allowWrite = true;
+    expect((await json(await getGaps(req("/api/evidence/gaps?framework=soc2")))).status).toBe(200);
   });
 
   it("the signed export carries the gap report, and editing it breaks the signature", async () => {
