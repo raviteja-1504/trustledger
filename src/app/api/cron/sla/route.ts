@@ -6,13 +6,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { checkSLABreaches } from "@/lib/slaMonitor";
+import { cronAuthorized } from "@/lib/cronAuth";
 
 export async function GET(req: NextRequest) {
-  // Protect with Vercel's cron secret
-  const auth = req.headers.get("authorization");
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  // Protect with the cron secret; with no CRON_SECRET configured nobody is let in
+  if (!cronAuthorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const db = createServiceClient();
   const result = await checkSLABreaches(db);

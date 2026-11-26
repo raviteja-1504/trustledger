@@ -15,6 +15,7 @@
 import crypto from "crypto";
 import { isPublicHttpUrl } from "./outboundUrl";
 import { safeFetch } from "./safeFetch";
+import { enqueueFailedDelivery, isRetryable } from "./webhookRetry";
 
 export type WebhookEventType =
   | "scan.completed"
@@ -35,6 +36,7 @@ export interface WebhookEvent {
 }
 
 interface WebhookConfig {
+  id?:     string;
   url:     string;
   secret?: string;         // HMAC secret for signature verification
   events:  WebhookEventType[];
@@ -122,7 +124,7 @@ export async function getOrgWebhooks(db: any, orgId: string): Promise<WebhookCon
   // Load from webhook_configs table (created in migration below)
   const { data: configs } = await db
     .from("webhook_configs")
-    .select("url, secret, events, enabled")
+    .select("id, url, secret, events, enabled")
     .eq("org_id", orgId) as { data: WebhookConfig[] | null };
 
   return configs ?? [];
@@ -148,5 +150,11 @@ export async function fireOrgWebhooks(
   };
 
   // Deliver to all hooks in parallel (non-blocking)
-  await Promise.allSettled(configs.map(cfg => deliverWebhook(cfg, fullEvent)));
+  await Promise.allSettled(configs.map(async cfg => {
+    const result = await deliverWebhook(cfg, fullEvent);
+    // A failed delivery is kept, with this exact event, for the retry job (lib/webhookRetry.ts).
+    if (!result.success && cfg.id && isRetryable(result.error)) {
+      await enqueueFailedDelivery(db, cfg.id, fullEvent, result.status_code, result.error);
+    }
+  }));
 }

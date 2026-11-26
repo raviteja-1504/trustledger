@@ -10,12 +10,10 @@ import { createServiceClient } from "@/lib/supabase";
 import { sendEmailAlert } from "@/lib/alertDelivery";
 import { logger } from "@/lib/logger";
 import { reportServerError } from "@/lib/serverErrors";
+import { cronAuthorized } from "@/lib/cronAuth";
 
 export async function GET(req: NextRequest) {
-  const auth = req.headers.get("authorization");
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  if (!cronAuthorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });   // also when CRON_SECRET is unset
 
   const db = createServiceClient();
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev";

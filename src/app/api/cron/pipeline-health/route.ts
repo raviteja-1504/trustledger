@@ -22,6 +22,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { enforceRetention, normalizeRetention, totalDeleted } from "@/lib/retention";
 import { computeOrgScore, saveSnapshot } from "@/lib/governanceScoreLoader";
 import { createCheckpoint } from "@/lib/auditCheckpoint";
+import { cronAuthorized } from "@/lib/cronAuth";
 
 export const maxDuration = 120;
 const RETENTION_DAYS = 30;
@@ -31,9 +32,7 @@ const SCORE_BUDGET_MS = 100_000;
 const CHECKPOINT_BUDGET_MS = 60_000;
 
 export async function GET(req: NextRequest) {
-  if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  if (!cronAuthorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });   // also when CRON_SECRET is unset
   return runWithTrace({ trace_id: newTraceId() }, () => run());
 }
 

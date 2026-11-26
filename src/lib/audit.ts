@@ -47,7 +47,8 @@ export type AuditEventType =
   | "repo_connected" | "repo_enabled" | "repo_disabled"
   | "data_exported"
   | "evidence_uploaded" | "evidence_deleted"
-  | "ai_tool_policy_changed" | "shadow_ai_triaged";
+  | "ai_tool_policy_changed" | "shadow_ai_triaged"
+  | "org_deletion_requested" | "org_deleted";
 
 interface AuditEntry {
   org_id:        string;
@@ -75,6 +76,7 @@ export function auditEntryHash(prevHash: string | null, eventType: string, actor
 export async function writeAuditLog(
   db: SupabaseClient<Database>,
   entry: AuditEntry,
+  opts: { strict?: boolean } = {},
 ): Promise<void> {
   // Serialise writes for this org within this process (best-effort; not distributed-safe).
   const prev = _writeLocks.get(entry.org_id) ?? Promise.resolve();
@@ -84,7 +86,7 @@ export async function writeAuditLog(
 
   try {
     await prev;
-    await _writeAuditLogInner(db, entry);
+    await _writeAuditLogInner(db, entry, !!opts.strict);
   } finally {
     releaseLock();
     // Clean up once the slot is no longer the latest promise for this org.
@@ -95,6 +97,7 @@ export async function writeAuditLog(
 async function _writeAuditLogInner(
   db: SupabaseClient<Database>,
   entry: AuditEntry,
+  strict: boolean,
 ): Promise<void> {
   // Read the most recent entry hash inside the (best-effort) lock.
   const { data: prev } = await db
@@ -110,7 +113,7 @@ async function _writeAuditLogInner(
   const entryHash = auditEntryHash(prevHash, entry.event_type, entry.actor_email ?? null, entry.payload, now);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (db.from("audit_log") as any).insert({
+  const { error } = await (db.from("audit_log") as any).insert({
     org_id:        entry.org_id,
     event_type:    entry.event_type,
     actor_id:      entry.actor_id ?? null,
@@ -122,6 +125,9 @@ async function _writeAuditLogInner(
     entry_hash:    entryHash,
     created_at:    now,
   });
+  // Best-effort by default (existing callers log events after the fact); strict callers -- those that must not
+  // proceed without the record, e.g. organisation deletion -- get the failure.
+  if (error && strict) throw new Error(`audit_write_failed: ${error.message ?? "unknown"}`);
 }
 
 export interface ChainRow { id: number; event_type: string; actor_email: string | null; payload: unknown; prev_hash: string | null; entry_hash: string; created_at: string }
