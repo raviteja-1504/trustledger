@@ -13,6 +13,7 @@
  *   - Status: Commit status API (not Check Runs)
  */
 
+import { readTextLimited } from "@/lib/readBody";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { runScan } from "@/lib/scanner";
@@ -30,6 +31,8 @@ import { blocksMerge, loadGate } from "@/lib/mergeGate";
 import { reportServerError } from "@/lib/serverErrors";
 import { coverageFailure, scanCoverage } from "@/lib/scanCoverage";
 import { CAPS } from "@/lib/limits";
+
+const MAX_WEBHOOK_BODY_BYTES = 10 * 1024 * 1024;
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -113,7 +116,8 @@ export async function POST(req: NextRequest) {
   if (process.env.ENABLE_GITLAB_WEBHOOK !== "true") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
-  const rawBody  = await req.text();
+  const rawBody  = await readTextLimited(req, MAX_WEBHOOK_BODY_BYTES);
+  if (rawBody === null) return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
   const token    = req.headers.get("x-gitlab-token") ?? "";
   const event    = req.headers.get("x-gitlab-event") ?? "";
   const secret   = process.env.GITLAB_WEBHOOK_TOKEN ?? "";

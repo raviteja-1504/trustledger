@@ -10,6 +10,7 @@
  * Auth: X-Hub-Signature (HMAC-SHA256 of request body, same pattern as GitHub)
  */
 
+import { readTextLimited } from "@/lib/readBody";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { runScan } from "@/lib/scanner";
@@ -26,6 +27,8 @@ import { blocksMerge, loadGate } from "@/lib/mergeGate";
 import { reportServerError } from "@/lib/serverErrors";
 import { coverageFailure, scanCoverage } from "@/lib/scanCoverage";
 import { CAPS } from "@/lib/limits";
+
+const MAX_WEBHOOK_BODY_BYTES = 10 * 1024 * 1024;
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -129,7 +132,8 @@ export async function POST(req: NextRequest) {
   if (process.env.ENABLE_BITBUCKET_WEBHOOK !== "true") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
-  const rawBody = await req.text();
+  const rawBody = await readTextLimited(req, MAX_WEBHOOK_BODY_BYTES);
+  if (rawBody === null) return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
   const sig     = req.headers.get("x-hub-signature-256") ?? req.headers.get("x-hub-signature");
   const event   = req.headers.get("x-event-key") ?? "";
   const secret  = process.env.BITBUCKET_WEBHOOK_SECRET ?? "";

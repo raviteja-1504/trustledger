@@ -4,6 +4,7 @@
  */
 import { createServiceClient } from "@/lib/supabase";
 import { logger } from "@/lib/logger";
+import { authBypassEnabled } from "@/lib/authBypass";
 import {
   ALL_PERMISSIONS, API_KEY_PERMISSIONS, NO_PERMISSIONS, PERMISSION_KEYS, builtinPermissions, permissionsFromRow,
   type PermissionKey, type Permissions,
@@ -24,7 +25,7 @@ function isMissingColumn(err: DbError): boolean {
 }
 
 async function loadPermissions(subject: PermissionSubject): Promise<Permissions> {
-  if (process.env.NEXT_PUBLIC_SKIP_AUTH === "true") return ALL_PERMISSIONS;
+  if (authBypassEnabled()) return ALL_PERMISSIONS;      // the demo switch, never in a production runtime (lib/authBypass.ts)
   if (!subject.org_id) return NO_PERMISSIONS;
   if (!subject.user_id) return API_KEY_PERMISSIONS;
   const base = builtinPermissions(subject.role);

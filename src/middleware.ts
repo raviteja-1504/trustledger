@@ -8,8 +8,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { authBypassEnabled, isProductionRuntime } from "@/lib/authBypass";
+import { getClientIp } from "@/lib/clientIp";
+import { applyCors, corsOriginAllowed } from "@/lib/cors";
 
-const SKIP_AUTH  = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
+// The demo switch is honoured only outside a production runtime (lib/authBypass.ts), whatever the variable says.
+const SKIP_AUTH  = authBypassEnabled();
 const IS_PROD    = process.env.NODE_ENV === "production";
 
 const PUBLIC_PATHS = new Set(["/login", "/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz", "/privacy", "/terms", "/security", "/.well-known/security.txt", "/.well-known/trustledger-export-signing-key",
@@ -79,7 +83,21 @@ function requestIdFor(req: NextRequest): string {
   return uuid.replace(/-/g, "").slice(0, 16);
 }
 
+/** API routes: answer CORS preflights before any auth (a preflight carries no credentials) and add CORS headers to every answer. */
 export async function middleware(req: NextRequest) {
+  if (!req.nextUrl.pathname.startsWith("/api/")) return handle(req);
+  const origin = req.headers.get("origin");
+  if (req.method === "OPTIONS") {
+    const res = new NextResponse(null, { status: corsOriginAllowed(origin) ? 204 : 403 });
+    applyCors(res, origin, true);
+    return res;
+  }
+  const res = await handle(req);
+  applyCors(res, origin);
+  return res;
+}
+
+async function handle(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const requestId = requestIdFor(req);
   const forwarded = new Headers(req.headers);
@@ -97,9 +115,18 @@ export async function middleware(req: NextRequest) {
 
   // Block oversized requests to API routes
   if (pathname.startsWith("/api/") && !pathname.startsWith("/api/webhook/")) {
-    const contentLength = parseInt(req.headers.get("content-length") ?? "0");
+    // The middleware cannot read the stream, so it refuses what it cannot bound: a declared size that is too big or not a
+    // number, and a chunked body with no declared size. Routes that read bodies (webhooks, scan-worker) also cap while streaming.
+    const rawLength = req.headers.get("content-length");
+    const contentLength = rawLength === null ? 0 : Number(rawLength);
+    if (!Number.isFinite(contentLength) || contentLength < 0) {
+      return NextResponse.json({ error: "invalid_content_length" }, { status: 400 });
+    }
     if (contentLength > MAX_BODY_BYTES) {
       return NextResponse.json({ error: "request_too_large", max_bytes: MAX_BODY_BYTES }, { status: 413 });
+    }
+    if (rawLength === null && /chunked/i.test(req.headers.get("transfer-encoding") ?? "") && ["POST", "PUT", "PATCH"].includes(req.method)) {
+      return NextResponse.json({ error: "length_required" }, { status: 411 });
     }
   }
 
@@ -121,9 +148,7 @@ export async function middleware(req: NextRequest) {
   // so no route can accidentally ship without one.
   if (pathname.startsWith("/api/")) {
     if (!isRateLimitExempt(pathname)) {
-      const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-        ?? req.headers.get("x-real-ip")
-        ?? "unknown";
+      const ip = getClientIp(req.headers);
       const rl = await checkRateLimit(ip, GLOBAL_API_LIMIT);
       if (!rl.success) {
         return NextResponse.json(
@@ -140,7 +165,9 @@ export async function middleware(req: NextRequest) {
   const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 
   if (!supabaseUrl || !supabaseKey) {
-    // Supabase not configured — allow through
+    // Without Supabase there is no way to tell who is asking. Only a local / development run may carry on without it; a
+    // production runtime fails closed instead of serving every dashboard page to anyone.
+    if (isProductionRuntime()) return NextResponse.json({ error: "auth_not_configured" }, { status: 503 });
     return pass();
   }
 
@@ -214,14 +241,6 @@ function addSecurityHeaders(res: NextResponse, pathname: string): void {
   res.headers.set("Cross-Origin-Opener-Policy",       "same-origin");
   res.headers.set("Cross-Origin-Resource-Policy",     "same-origin");
   res.headers.set("Cross-Origin-Embedder-Policy",     "require-corp");
-
-  // API routes — add CORS for SDK usage
-  if (pathname.startsWith("/api/")) {
-    res.headers.set("Access-Control-Allow-Origin",      process.env.NEXT_PUBLIC_APP_URL ?? "*");
-    res.headers.set("Access-Control-Allow-Methods",     "GET, POST, PATCH, DELETE, OPTIONS");
-    res.headers.set("Access-Control-Allow-Headers",     "Content-Type, Authorization, X-TrustLedger-Key, X-Gitlab-Token, X-Hub-Signature-256");
-    res.headers.set("Access-Control-Max-Age",           "86400");
-  }
 }
 
 export const config = {

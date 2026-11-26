@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkScanAllowed } from "@/lib/planGate";
+import { authBypassEnabled } from "@/lib/authBypass";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { runScan } from "@/lib/scanner";
@@ -157,7 +158,7 @@ export async function POST(req: NextRequest) {
 
   // The plan's limits (scans a month, repositories) apply to every way of starting a scan, not only the GitHub webhook: an API key or the
   // dashboard's "New scan" would otherwise go past them. Fails open on a database error, like the webhook's own check.
-  if (process.env.NEXT_PUBLIC_SKIP_AUTH !== "true") {
+  if (!authBypassEnabled()) {
     const verdict = await checkScanAllowed(createServiceClient(), org_id, body.repo);
     if (!verdict.allowed) {
       return NextResponse.json({ error: `plan_limit_${verdict.reason}`, message: `${verdict.title}. ${verdict.summary}` }, { status: 403 });
@@ -257,8 +258,8 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // ── Demo mode: skip all DB writes, return result immediately ─────────────
-  if (process.env.NEXT_PUBLIC_SKIP_AUTH === "true") {
+  // ── Demo mode: skip all DB writes, return result immediately (never in a production runtime) ─────────────
+  if (authBypassEnabled()) {
     return NextResponse.json({
       scan_id:             result.scan_id,
       repo:                body.repo,

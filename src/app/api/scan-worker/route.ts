@@ -10,6 +10,7 @@
  * with a 300s timeout budget, isolated per org.
  */
 
+import { readTextLimited } from "@/lib/readBody";
 import { NextRequest, NextResponse } from "next/server";
 import { Receiver } from "@upstash/qstash";
 import { createServiceClient } from "@/lib/supabase";
@@ -55,6 +56,8 @@ import { runWithTrace, newTraceId, adoptTraceId, annotateTrace } from "@/lib/tra
 import { recordEvent } from "@/lib/opsEvents";
 import { reportServerError } from "@/lib/serverErrors";
 import { logger } from "@/lib/logger";
+
+const MAX_WORKER_BODY_BYTES = 10 * 1024 * 1024;
 
 // The "300s timeout budget" this file's own header comment describes was
 // never actually configured anywhere -- without this export, the route ran
@@ -129,7 +132,8 @@ export async function POST(req: NextRequest) {
 }
 
 async function handle(req: NextRequest) {
-  const rawBody = await req.text();
+  const rawBody = await readTextLimited(req, MAX_WORKER_BODY_BYTES);
+  if (rawBody === null) return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
 
   if (!await verifyRequest(req, rawBody)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

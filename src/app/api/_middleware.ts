@@ -18,6 +18,8 @@ import { createServiceClient } from "@/lib/supabase";
 import { getJwtSessionId, getJwtSsoProviderId } from "@/lib/jwt";
 import { resolveSsoMembership, ssoEnforcement, ssoRequiredError } from "@/lib/ssoMembership";
 import { annotateTrace } from "@/lib/trace";
+import { authBypassEnabled } from "@/lib/authBypass";
+import { getClientIp } from "@/lib/clientIp";
 import crypto from "crypto";
 export { permissionsFor, requirePermission } from "@/lib/permissionResolver";
 
@@ -34,23 +36,13 @@ export function addApiHeaders(res: NextResponse, startMs?: number): NextResponse
 // ── IP allowlist check ────────────────────────────────────────────────────────
 // Returns null if allowed, error string if blocked.
 async function checkIPAllowlist(
-  db: ReturnType<typeof createServiceClient>,
-  org_id: string,
+  allowlist: string[] | null | undefined,
   req:    NextRequest,
 ): Promise<string | null> {
-  const { data: key } = await db
-    .from("api_keys")
-    .select("ip_allowlist")
-    .eq("org_id", org_id)
-    .limit(1)
-    .single() as { data: { ip_allowlist: string[] | null } | null };
-
-  const allowlist = key?.ip_allowlist;
+  // The allowlist belongs to the key that authenticated this request (not some other key of the org).
   if (!allowlist || allowlist.length === 0) return null; // no restriction
 
-  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    ?? req.headers.get("x-real-ip")
-    ?? "unknown";
+  const clientIp = getClientIp(req.headers);
 
   if (allowlist.includes(clientIp) || allowlist.includes("*")) return null;
   return `ip_not_allowed: ${clientIp} is not in the allowlist`;
@@ -105,8 +97,8 @@ export function requireRole(
 }
 
 export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
-  // ── Demo / local-testing bypass ───────────────────────────────────────────
-  if (process.env.NEXT_PUBLIC_SKIP_AUTH === "true") {
+  // ── Demo / local-testing bypass (never in a production runtime: lib/authBypass.ts) ──────────────────────
+  if (authBypassEnabled()) {
     return { org_id: "demo", actor_email: "demo@trustledger.dev" };
   }
 
@@ -197,12 +189,12 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
     const keyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
     const { data: key } = await db
       .from("api_keys")
-      .select("org_id, expires_at, revoked")
+      .select("org_id, expires_at, revoked, ip_allowlist")
       .eq("key_hash", keyHash)
       .single();
 
     if (!key || (key as { revoked: boolean }).revoked) return { org_id: "", error: "invalid_api_key" };
-    const ipErr = await checkIPAllowlist(db, (key as { org_id: string }).org_id, req);
+    const ipErr = await checkIPAllowlist((key as { ip_allowlist?: string[] | null }).ip_allowlist, req);
     if (ipErr) return { org_id: "", error: ipErr };
     if (key.expires_at && new Date(key.expires_at) < new Date()) {
       return { org_id: "", error: "api_key_expired" };

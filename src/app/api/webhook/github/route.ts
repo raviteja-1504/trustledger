@@ -10,6 +10,7 @@
  * The scan-worker route does: fetch files, run scanner, persist, update check run, post comment.
  */
 
+import { readTextLimited } from "@/lib/readBody";
 import { NextRequest, NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { createServiceClient } from "@/lib/supabase";
@@ -74,12 +75,9 @@ async function closeCheckRunAfterEnqueueFailure(
 }
 
 async function handleDelivery(req: NextRequest, ctx: { registeredGuid?: string }) {
-  const rawBody = await req.text();
-
-  // ── 0a. Request size limit ─────────────────────────────────────────────────
-  if (rawBody.length > MAX_WEBHOOK_BODY_BYTES) {
-    return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
-  }
+  // ── 0a. Request size limit (enforced while streaming) ──────────────────────
+  const rawBody = await readTextLimited(req, MAX_WEBHOOK_BODY_BYTES);
+  if (rawBody === null) return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
 
   const sig          = req.headers.get("x-hub-signature-256");
   const event        = req.headers.get("x-github-event");
