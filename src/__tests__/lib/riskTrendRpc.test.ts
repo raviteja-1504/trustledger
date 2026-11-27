@@ -32,3 +32,17 @@ describe("the chart over a 90-day period", () => {
     expect(weeks[0]).toMatchObject({ critical_count: 4, high_count: 2, medium_count: 1 });
   });
 });
+
+describe("get_risk_trend counts each file once", () => {
+  const sql = () => {
+    const files = fs.readdirSync(DIR).filter(f => /CREATE OR REPLACE FUNCTION get_risk_trend/i.test(fs.readFileSync(path.join(DIR, f), "utf8"))).sort();
+    return fs.readFileSync(path.join(DIR, files[files.length - 1]), "utf8").split(/\$\$/)[1];
+  };
+  it("keeps one row per repository + PR + path (its latest scan), before filtering by risk", () => {
+    const body = sql();
+    expect(body).toMatch(/DISTINCT ON \(s\.repo_full_name, COALESCE\(s\.pr_number, 0\), f\.file_path\)/);
+    expect(body).toMatch(/ORDER BY s\.repo_full_name, COALESCE\(s\.pr_number, 0\), f\.file_path, s\.created_at DESC/);
+    // the risk filter is applied AFTER the latest row is chosen, so a file fixed in a later scan is not counted
+    expect(body.indexOf("DISTINCT ON")).toBeLessThan(body.indexOf("risk_score IN"));
+  });
+});
