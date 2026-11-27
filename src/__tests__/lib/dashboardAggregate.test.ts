@@ -168,3 +168,64 @@ describe("the SLA page's list (sla_open_files) is the dashboard's own SLA set", 
     expect(d.sla_breach_high_count).toBe(1500);
   });
 });
+
+describe("risk trend and totals", () => {
+  it("totals are the sum of the weekly (de-duplicated) trend, so the donut matches the chart", async () => {
+    // get_risk_trend counts each file once, from its latest scan; the totals must come from the same rows, not from a
+    // separate count over every scan's files (a PR scanned three times counted each file three times)
+    seed({}, { rpc: { get_risk_trend: () => [
+      { week_start: "2026-11-23", critical_count: 1, high_count: 4, medium_count: 2 },
+      { week_start: "2026-11-16", critical_count: 0, high_count: 3, medium_count: 5 },
+    ] } });
+    const data = await fetchDashboard(ORG, 30, null);
+    expect(data.risk_trend.map(t => t.high_count)).toEqual([3, 4]);
+    expect(data.risk_totals).toEqual({ critical_count: 1, high_count: 7, medium_count: 7 });
+  });
+
+  it("is all zeros when nothing is flagged", async () => {
+    seed({}, { rpc: { get_risk_trend: () => [] } });
+    expect((await fetchDashboard(ORG, 30, null)).risk_totals).toEqual({ critical_count: 0, high_count: 0, medium_count: 0 });
+  });
+});
+
+describe("review queue covers every open PR of a repo", () => {
+  const prScan = (id: string, pr: number | null, ageDays: number) => ({ ...scan(id, "o/api", ageDays, 0.5, 3), pr_number: pr });
+  const prFile = (scanId: string, pr: number, path: string, risk = "HIGH", ai = 0.5) =>
+    ({ ...riskFile(scanId, "o/api", path, risk, ai), scans: { repo_full_name: "o/api", pr_number: pr } });
+
+  const seedPrs = () => seed({
+    scans: [prScan("p5new", 5, 1), prScan("p5old", 5, 6), prScan("p7", 7, 2), prScan("p9", 9, 3)],
+    scan_files: [
+      prFile("p5new", 5, "src/a.ts"),
+      prFile("p5old", 5, "src/gone.ts"),            // fixed in PR 5's newer scan: not flagged there any more
+      prFile("p7", 7, "src/b.ts", "CRITICAL", 0.9),
+      prFile("p9", 9, "src/c.ts"),
+    ],
+    attestations: [], violations: [],
+  });
+
+  it("lists files from the latest scan of each PR, not only the repo's single latest scan", async () => {
+    seedPrs();
+    const d = await fetchDashboard(ORG, 90, null);
+    expect(d.top_risk_files.map(f => f.file_path).sort()).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+    expect(d.top_risk_files.find(f => f.file_path === "src/b.ts")!.pr_number).toBe(7);
+  });
+
+  it("does not list a file only an older scan of its PR flagged", async () => {
+    seedPrs();
+    const d = await fetchDashboard(ORG, 90, null);
+    expect(d.top_risk_files.some(f => f.file_path === "src/gone.ts")).toBe(false);
+  });
+
+  it("counts the same path in two PRs once, shown from the newer scan", async () => {
+    seed({
+      scans: [prScan("p5", 5, 4), prScan("p7", 7, 1)],
+      scan_files: [prFile("p5", 5, "src/shared.ts", "HIGH", 0.95), prFile("p7", 7, "src/shared.ts", "HIGH", 0.2)],
+      attestations: [], violations: [],
+    });
+    const d = await fetchDashboard(ORG, 90, null);
+    expect(d.top_risk_files).toHaveLength(1);
+    expect(d.top_risk_files[0]).toMatchObject({ scan_id: "p7", pr_number: 7 });
+    expect(d.total_high_crit).toBe(1);
+  });
+});

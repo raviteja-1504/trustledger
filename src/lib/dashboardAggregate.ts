@@ -70,12 +70,16 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // the project has a max_rows setting). Scoping to ~4 repos × ~100 files
   // = ~400 rows eliminates the limit problem permanently regardless of how
   // many historical scans or backfilled attestation rows the org accumulates.
+  // The latest scan of every PR (a direct push, with no PR, counts as one "PR" per repo), not just the repo's single latest
+  // scan: files waiting for review in a repo's other open PRs belong in the review queue too. (Name kept; it is no longer one
+  // per repo.) A file is still one (repo, path), shown from its most recent scan -- see currentRiskFiles.
   const latestScanIdPerRepo = (() => {
     const m = new Map<string, { id: string; created_at: string }>();
     for (const s of scans ?? []) {
-      const existing = m.get(s.repo_full_name);
+      const key = `${s.repo_full_name}::${s.pr_number ?? 0}`;
+      const existing = m.get(key);
       if (!existing || s.created_at > existing.created_at) {
-        m.set(s.repo_full_name, { id: s.id, created_at: s.created_at });
+        m.set(key, { id: s.id, created_at: s.created_at });
       }
     }
     return [...m.values()].map(v => v.id);
@@ -123,6 +127,11 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     .order("ai_percentage", { ascending: false })
     .order("file_path", { ascending: true })
     .range(from, to) as unknown as PromiseLike<{ data: RiskFileRow[] | null }>);
+  // A file seen in several PRs' scans is one (repo, path): newest scan first, so that is the row every later dedupe keeps.
+  const scanCreated = new Map(scans.map(s => [s.id, s.created_at]));
+  riskFiles.sort((a, b) =>
+    (scanCreated.get(b.scan_id) ?? "").localeCompare(scanCreated.get(a.scan_id) ?? "")
+    || b.ai_percentage - a.ai_percentage || a.file_path.localeCompare(b.file_path));
 
 
   // Build repo stats
@@ -165,16 +174,17 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // large, so every repo showed ~0% even when 100% of its actual CRITICAL/
   // HIGH files were attested. riskFiles is already fetched (CRITICAL/HIGH,
   // scoped to latestScanIdPerRepo) for top_risk_files -- reuse it here.
-  // Distinct CRITICAL/HIGH files per repo (latest scan), and how many of THOSE have at least one attestation.
-  // Counted per file, so a second reviewer's sign-off on the same file doesn't count it twice.
+  // Distinct CRITICAL/HIGH files per repo (each file as of its newest scan), and how many of THOSE have at least one
+  // attestation. Counted per (repo, path), so neither a second reviewer's sign-off nor the same file in two PRs counts twice.
   const highCritPerRepo = new Map<string, number>();
   const attestedPerRepo = new Map<string, number>();
   const countedFiles = new Set<string>();
   riskFiles.forEach(f => {
     const repo = f.scans?.repo_full_name;
     const key  = `${f.scan_id}::${f.file_path}`;
-    if (!repo || countedFiles.has(key)) return;
-    countedFiles.add(key);
+    const fileKey = `${repo}::${f.file_path}`;
+    if (!repo || countedFiles.has(fileKey)) return;
+    countedFiles.add(fileKey);
     highCritPerRepo.set(repo, (highCritPerRepo.get(repo) ?? 0) + 1);
     if (attestedFileSet.has(key)) attestedPerRepo.set(repo, (attestedPerRepo.get(repo) ?? 0) + 1);
   });
@@ -255,29 +265,12 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     }
   }
 
-  // Risk Distribution totals — deliberately NOT derived by summing
-  // risk_trend above. That array is a row-limited, per-week breakdown (it
-  // has to fetch actual rows to bucket by week); summing it silently
-  // truncates at whatever the row limit happens to be. A vulnerability-
-  // dense org blew straight through 1000 and the donut displayed exactly
-  // "1000" -- a dead giveaway it was hitting the cap rather than showing
-  // the real total. These are separate, exact COUNT queries (head:true --
-  // no rows transferred, so PostgREST's max_rows row-transfer cap doesn't
-  // apply), one per risk level, so the distribution is always accurate
-  // regardless of how many files that entails.
-  const countByRisk = async (risk: string): Promise<number> => {
-    if (scanIdsInRange.length === 0) return 0;
-    const { count } = await db
-      .from("scan_files")
-      .select("id", { count: "exact", head: true })
-      .in("scan_id", scanIdsInRange)
-      .eq("risk_score", risk);
-    return count ?? 0;
-  };
-  const [criticalTotal, highTotal, mediumTotal] = await Promise.all([
-    countByRisk("CRITICAL"), countByRisk("HIGH"), countByRisk("MEDIUM"),
-  ]);
-  const risk_totals = { critical_count: criticalTotal, high_count: highTotal, medium_count: mediumTotal };
+  // Risk Distribution totals. Each flagged file counted once (get_risk_trend keeps a file's LATEST scan only), so the period's totals are the sum of
+  // its weeks -- the same numbers the chart shows. (They used to be separate counts over every scan's rows: a PR scanned three
+  // times counted every file three times.)
+  const risk_totals = risk_trend.reduce(
+    (t, p) => ({ critical_count: t.critical_count + p.critical_count, high_count: t.high_count + p.high_count, medium_count: t.medium_count + p.medium_count }),
+    { critical_count: 0, high_count: 0, medium_count: 0 });
 
   // Top risk files — dedupe by repo+file_path, keeping each file's most
   // recent scan (riskFiles is ordered created_at desc), then rank by AI%.
