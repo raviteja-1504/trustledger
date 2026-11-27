@@ -50,6 +50,7 @@ export async function POST(req: NextRequest) {
   try {
     const result = await createCheckpoint(db, org_id);
     if (result.created) {
+      // audit: best-effort (checkpoint bookkeeping, not a security decision: not one of the actions that must fail without a record)
       await writeAuditLog(db, {
         org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
         resource_type: "audit_checkpoint", resource_id: String(result.checkpoint.payload.sequence),

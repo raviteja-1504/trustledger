@@ -68,6 +68,7 @@ export async function handleAttest(
   if (!result.ok) {
     if (result.reason === "forbidden") return slackError(`Your role can't attest ${result.risk_score} files.`);
     if (result.reason === "scan_not_found") return slackError("Scan not found — check the scan_id and try again.");
+    if (result.reason === "audit_unavailable") return slackError("That attestation could not be recorded in the audit log, so it was not applied. Please try again.");
     return slackError("Couldn't record that attestation. Please try again or use the dashboard.");
   }
 

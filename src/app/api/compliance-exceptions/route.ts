@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 
 interface ExceptionRow {
@@ -87,12 +87,13 @@ export async function POST(req: NextRequest) {
 
   if (error || !data) return safeError(error, { code: "exception_create_failed", message: "We couldn't log that exception. Please try again." });
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id!, event_type: "exception_created",
     actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "compliance_exception", resource_id: data.id,
     payload: { title: data.title, framework_id: data.framework_id, control_id: data.control_id },
   });
+  if (auditFailed) return auditFailed;
 
   return NextResponse.json({ exception: data });
 }
@@ -117,12 +118,13 @@ export async function PATCH(req: NextRequest) {
 
   if (error || !data) return safeError(error, { code: "exception_update_failed", message: "We couldn't update that exception. Please try again." });
 
-  await writeAuditLog(db, {
+  const auditFailed2 = await requireAudit(db, {
     org_id: auth.org_id!, event_type: "exception_resolved",
     actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "compliance_exception", resource_id: data.id,
     payload: { title: data.title, framework_id: data.framework_id, control_id: data.control_id, status: data.status },
   });
+  if (auditFailed2) return auditFailed2;
 
   return NextResponse.json({ exception: data });
 }

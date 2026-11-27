@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { normalizePolicy, AI_TOOLS } from "@/lib/aiTools";
 import { summarize, type ShadowStatus } from "@/lib/shadowAi";
 import { loadPolicy, loadTriage, loadShadowAi, resolveClearedShadowAlerts } from "@/lib/shadowAiStore";
@@ -62,11 +63,12 @@ export async function PUT(req: NextRequest) {
   const { error } = await (db.from("organizations") as any).update({ ai_tool_policy: value }).eq("id", auth.org_id);
   if (error) return NextResponse.json({ error: "not_available", message: "Saving the AI tool policy needs the 20261020_shadow_ai migration." }, { status: 503 });
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "ai_tool_policy_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "ai_tool_policy", resource_id: auth.org_id,
     payload: { allowed, previous: previous?.allowed ?? null },
   });
+  if (auditFailed) return auditFailed;
   // Approving a tool can leave a repository with nothing open: its Shadow AI alerts are done.
   await resolveClearedShadowAlerts(db, auth.org_id);
   return NextResponse.json({ policy: value });

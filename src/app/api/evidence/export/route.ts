@@ -32,6 +32,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
 import { writeAuditLog, canonicalJson } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { rowToEvidenceRecord, checkIntegrity } from "@/lib/evidenceRecord";
 import { isTrustedEvidence } from "@/lib/evidenceVerification";
@@ -188,7 +189,7 @@ export async function GET(req: NextRequest) {
       : { note: "No signing key configured; set EXPORT_SIGNING_PRIVATE_KEY to enable Ed25519 signatures." },
   };
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id:        auth.org_id,
     event_type:    "data_exported",
     actor_id:      auth.user_id ?? null,
@@ -203,6 +204,7 @@ export async function GET(req: NextRequest) {
       signed:           !!signature,
     },
   });
+  if (auditFailed) return auditFailed;
 
   return new NextResponse(JSON.stringify(response, null, 2), {
     status: 200,

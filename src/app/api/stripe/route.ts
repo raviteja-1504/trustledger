@@ -97,6 +97,7 @@ export async function POST(req: NextRequest) {
     allow_promotion_codes: true,
   });
 
+  // audit: best-effort (billing sync: not one of the actions that must fail without a record)
   await writeAuditLog(db, {
     org_id,
     event_type:    "org_settings_changed",

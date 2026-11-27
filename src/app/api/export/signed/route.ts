@@ -24,6 +24,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
 import { verifyAuditChain, writeAuditLog, canonicalJson, MAX_AUDIT_ROWS } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { signEd25519, type Ed25519Signature } from "@/lib/exportSigning";
 import { allRows } from "@/lib/allRows";
 import { csvLine } from "@/lib/csv";
@@ -109,11 +110,12 @@ export async function GET(req: NextRequest) {
   const keyUrl = new URL("/.well-known/trustledger-export-signing-key", req.url).toString();
 
   // Logged after the export content is fixed, so this entry is never part of the export it describes.
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id, event_type: "data_exported", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "export", resource_id: "audit_signed",
     payload: { export_type: "audit_signed", format: format === "csv" ? "csv" : "json", rows: eventList.length, period_start: start, period_end: end },
   });
+  if (auditFailed) return auditFailed;
 
   if (format === "csv") {
     // Every column the audit hash is computed from, so each entry can be re-hashed from this file. created_at in the one

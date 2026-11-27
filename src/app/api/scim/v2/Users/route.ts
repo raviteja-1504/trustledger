@@ -20,6 +20,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { logger } from "@/lib/logger";
 import crypto from "crypto";
 import { verifyScimRequest, scimMayProvision } from "@/lib/scimAuth";
+import { requireAudit } from "@/lib/auditRequired";
 
 const SCIM_CONTENT_TYPE = "application/scim+json";
 
@@ -139,13 +140,27 @@ export async function POST(req: NextRequest) {
   }
 
   // Create org membership
-  await db.from("org_members").upsert({
+  const { error: memberErr } = await db.from("org_members").upsert({
     org_id:   auth.org_id,
     user_id:  authUser.user.id,
     email,
     name:     name || null,
     role:     "developer",
   }, { onConflict: "org_id,user_id" });
+  if (memberErr) {
+    const refId = crypto.randomBytes(4).toString("hex");
+    logger.error("scim_member_create_failed", { ref_id: refId, detail: memberErr.message });
+    return NextResponse.json({
+      schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: "500", detail: `User provisioning failed. Reference: ${refId}`,
+    }, { status: 500, headers: { "Content-Type": SCIM_CONTENT_TYPE } });
+  }
+
+  // Granting access is recorded or undone: a member nobody can account for must not exist.
+  const auditFailed = await requireAudit(db, {
+    org_id: auth.org_id, event_type: "user_added", actor_id: null, actor_email: "scim",
+    resource_type: "user", resource_id: authUser.user.id, payload: { via: "scim", email, role: "developer" },
+  }, { undo: async () => { const { error: undoErr } = await db.from("org_members").delete().eq("org_id", auth.org_id).eq("user_id", authUser.user.id); if (undoErr) throw undoErr; } });
+  if (auditFailed) return auditFailed;
 
   const member = { user_id: authUser.user.id, email, name, org_id: auth.org_id };
   return NextResponse.json(scimUser(member, host), {

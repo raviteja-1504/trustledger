@@ -140,6 +140,9 @@ export async function POST(req: NextRequest) {
     if (result.reason === "scan_not_found") {
       return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
     }
+    if (result.reason === "audit_unavailable") {
+      return NextResponse.json({ error: "audit_unavailable", action_completed: false, message: "The sign-off could not be recorded in the audit log, so it was not applied. Please try again." }, { status: 500 });
+    }
     return safeError(result.detail, { code: "attestation_failed", message: "We couldn't record this attestation. Please try again." });
   }
 

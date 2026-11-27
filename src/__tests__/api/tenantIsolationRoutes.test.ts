@@ -66,7 +66,7 @@ describe("platform_admin can't be granted by an org admin", () => {
     const res = await settingsPOST(req("/api/settings", "POST", { action: "update_member_role", user_id: "u-dev", role: "security_reviewer" }));
     expect(res.status).toBe(200);
     expect(rows("org_members").find(m => m.user_id === "u-dev")!.role).toBe("security_reviewer");
-    expect(audit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ event_type: "member_role_changed", payload: { new_role: "security_reviewer" } }));
+    expect(audit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ event_type: "member_role_changed", payload: { new_role: "security_reviewer" } }), { strict: true });
   });
 
   it("team: rejects platform_admin", async () => {

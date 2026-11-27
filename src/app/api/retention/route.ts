@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { loadRetention, normalizeRetention, purgeScansBefore, purgeTableBefore, MIN_DAYS, MAX_DAYS } from "@/lib/retention";
 
@@ -46,7 +47,7 @@ export async function PATCH(req: NextRequest) {
   const { error: saveErr } = await db.from("organizations").update({ retention_policy: next }).eq("id", org_id);
   if (saveErr) return safeError(saveErr, { code: "retention_save_failed", message: "We couldn't save the retention policy. Please try again." });
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id,
     event_type:    "org_settings_changed",
     actor_id:      user_id ?? null,
@@ -54,6 +55,7 @@ export async function PATCH(req: NextRequest) {
     resource_type: "retention_policy",
     payload:       { from: { ...current, last_result: undefined }, to: { ...next, last_result: undefined } },
   });
+  if (auditFailed) return auditFailed;
 
   return NextResponse.json({ ok: true, policy: next });
 }
@@ -91,6 +93,13 @@ export async function DELETE(req: NextRequest) {
   let deleted = 0;
   const skipped: Record<string, string> = {};
 
+  // Deletion cannot be undone, so it is recorded BEFORE it happens: nothing is deleted unless the request is on record.
+  const requested = await requireAudit(db, {
+    org_id, event_type: "org_settings_changed", actor_id: user_id ?? null, actor_email: actor_email ?? null,
+    resource_type: "data_deletion", payload: { phase: "requested", scope, before: cutoff },
+  });
+  if (requested) return requested;
+
   // Attested scans can never be deleted (attestations are immutable by DB rule): only unreviewed scans go.
   if (scope === "scans" || scope === "all") {
     const r = await purgeScansBefore(db, org_id, cutoff, 1000);
@@ -110,14 +119,15 @@ export async function DELETE(req: NextRequest) {
     else deleted += r.deleted;
   }
 
-  await writeAuditLog(db, {
+  const auditFailed2 = await requireAudit(db, {
     org_id,
     event_type:    "org_settings_changed",
     actor_id:      user_id ?? null,
     actor_email:   actor_email ?? null,
     resource_type: "data_deletion",
-    payload:       { scope, before: cutoff, records_deleted: deleted, skipped },
+    payload:       { phase: "completed", scope, before: cutoff, records_deleted: deleted, skipped },
   });
+  if (auditFailed2) return auditFailed2;
 
   return NextResponse.json({ ok: true, deleted, scope, before: cutoff, skipped });
 }
@@ -179,6 +189,12 @@ export async function POST(req: NextRequest) {
     // (not CASCADE), so they must be cleared before scans is deleted, or
     // that delete fails outright. scan_files cascades from scans
     // automatically. Order matters here in a way it didn't before.
+    // Erasure cannot be undone, so it is recorded BEFORE it happens: nothing is erased unless the request is on record.
+    const erasureRequested = await requireAudit(db, {
+      org_id, event_type: "org_settings_changed", actor_id: user_id ?? null, actor_email: actor_email ?? null,
+      resource_type: "account_deletion", payload: { action: "gdpr_erasure", phase: "requested" },
+    });
+    if (erasureRequested) return erasureRequested;
     const dependents = ["violations", "secret_findings", "alerts"];
     // attestations deliberately excluded -- the DB rule that makes it
     // immutable replaces DELETE with a no-op rather than raising an error,
@@ -200,14 +216,15 @@ export async function POST(req: NextRequest) {
       if (delErr) failed.push(table); else cleared.push(table);
     }
 
-    await writeAuditLog(db, {
+    const auditFailed3 = await requireAudit(db, {
       org_id,
       event_type:    "org_settings_changed",
       actor_id:      user_id ?? null,
       actor_email:   actor_email ?? null,
       resource_type: "account_deletion",
-      payload:       { action: "gdpr_erasure", tables_cleared: cleared, tables_retained: retained, tables_failed: failed },
+      payload:       { action: "gdpr_erasure", phase: "completed", tables_cleared: cleared, tables_retained: retained, tables_failed: failed },
     });
+    if (auditFailed3) return auditFailed3;
 
     return NextResponse.json({
       ok:      true,

@@ -15,7 +15,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { checkGrantable } from "@/lib/permissionResolver";
 import { PERMISSION_KEYS, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 
 const SETUP_HINT = "Custom roles need database migration 005_advanced_rbac.";
@@ -81,10 +81,11 @@ export async function POST(req: NextRequest) {
     if (isNotSetUp(error)) return NextResponse.json({ error: "custom_roles_not_set_up", message: SETUP_HINT }, { status: 422 });
     return safeError(error, { code: "custom_role_create_failed", message: "We couldn't create that role. Please try again." });
   }
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "policy_change", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "custom_role", resource_id: (data as Row).id, payload: { action: "created", name, permissions: flags },
   });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ role: data }, { status: 201 });
 }
 
@@ -115,10 +116,11 @@ export async function PATCH(req: NextRequest) {
     if (error.code === "23505") return NextResponse.json({ error: "duplicate_name" }, { status: 409 });
     return safeError(error, { code: "custom_role_update_failed", message: "We couldn't save that role. Please try again." });
   }
-  await writeAuditLog(db, {
+  const auditFailed2 = await requireAudit(db, {
     org_id: auth.org_id, event_type: "policy_change", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "custom_role", resource_id: id, payload: { action: "updated", changes: updates },
   });
+  if (auditFailed2) return auditFailed2;
   return NextResponse.json({ role: data });
 }
 
@@ -142,9 +144,10 @@ export async function DELETE(req: NextRequest) {
   const { error } = await db.from("custom_roles").delete().eq("id", id).eq("org_id", auth.org_id);
   if (error) return safeError(error, { code: "custom_role_delete_failed", message: "We couldn't remove that role. Please try again." });
 
-  await writeAuditLog(db, {
+  const auditFailed3 = await requireAudit(db, {
     org_id: auth.org_id, event_type: "policy_change", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "custom_role", resource_id: id, payload: { action: "deleted", name: (current as Row).name },
   });
+  if (auditFailed3) return auditFailed3;
   return NextResponse.json({ ok: true });
 }

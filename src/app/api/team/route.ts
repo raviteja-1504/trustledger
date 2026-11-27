@@ -10,7 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { ASSIGNABLE_ROLES as VALID_ROLES, type AssignableRole as MemberRole } from "@/lib/memberRoles";
 import { checkGrantable } from "@/lib/permissionResolver";
@@ -124,7 +124,7 @@ export async function POST(req: NextRequest) {
     return safeError(insertErr, { code: "invite_failed", message: "We couldn't send that invite. Please check the email address and try again." });
   }
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id:        auth.org_id,
     event_type:    "member_invited",
     actor_id:      auth.user_id ?? null,
@@ -133,6 +133,7 @@ export async function POST(req: NextRequest) {
     resource_id:   member.id,
     payload:       { email, role },
   });
+  if (auditFailed) return auditFailed;
 
   return NextResponse.json({ member }, { status: 201 });
 }
@@ -195,7 +196,7 @@ export async function PATCH(req: NextRequest) {
   }
   if (updateErr || !member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
 
-  await writeAuditLog(db, {
+  const auditFailed2 = await requireAudit(db, {
     org_id:        auth.org_id,
     event_type:    "member_role_changed",
     actor_id:      auth.user_id ?? null,
@@ -204,6 +205,7 @@ export async function PATCH(req: NextRequest) {
     resource_id:   member.id,
     payload:       { target_user_id: body.user_id, ...(changesRole ? { new_role: body.role } : {}), ...(changesCustomRole ? { custom_role_id: body.custom_role_id } : {}) },
   });
+  if (auditFailed2) return auditFailed2;
 
   return NextResponse.json({ member: { ...member, ...(changesCustomRole ? { custom_role_id: body.custom_role_id } : {}) } });
 }
@@ -260,7 +262,7 @@ export async function DELETE(req: NextRequest) {
 
   await db.from("org_members").delete().eq("org_id", auth.org_id).eq("id", member.id);
 
-  await writeAuditLog(db, {
+  const auditFailed3 = await requireAudit(db, {
     org_id:        auth.org_id,
     event_type:    "member_removed",
     actor_id:      auth.user_id ?? null,
@@ -269,6 +271,7 @@ export async function DELETE(req: NextRequest) {
     resource_id:   member.id,
     payload:       { removed_email: member.email },
   });
+  if (auditFailed3) return auditFailed3;
 
   return NextResponse.json({ ok: true });
 }

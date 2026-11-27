@@ -15,6 +15,7 @@ import { getInstallationToken, listInstallationRepos } from "@/lib/github";
 import { safeError } from "@/lib/errors";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { repoSlotsLeft, UPGRADE_LINE } from "@/lib/planGate";
 
 /** Repos switched on/off or added change what the dashboard counts — drop its cached numbers right away. */
@@ -140,11 +141,13 @@ export async function PATCH(req: NextRequest) {
     .select("id, is_active, repo_full_name") as { data: Array<{ repo_full_name?: string }> | null };
   if (!data || data.length === 0) return NextResponse.json({ error: "repo_not_found" }, { status: 404 });
   await invalidateDashboard(auth.org_id);
-  await writeAuditLog(db, {
+  // Switching a repository off is recorded or undone: scanning is not left disabled with no trace of who did it.
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: body.is_active ? "repo_enabled" : "repo_disabled",
     actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "repository", resource_id: body.id,
     payload: { repo: data[0].repo_full_name ?? null },
-  });
+  }, { undo: async () => { const { error: undoErr } = await db.from("repositories").update({ is_active: !body.is_active }).eq("id", body.id).eq("org_id", auth.org_id); if (undoErr) throw undoErr; } });
+  if (auditFailed) { await invalidateDashboard(auth.org_id); return auditFailed; }
   return NextResponse.json({ ok: true });
 }

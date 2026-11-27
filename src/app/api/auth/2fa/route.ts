@@ -14,7 +14,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import crypto from "crypto";
 import { generateTOTPSecret, verifyTOTP, buildOtpAuthUri } from "@/lib/totp";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { sealSecret, openSecret, hashBackupCode, matchBackupCode, needsUpgrade } from "@/lib/secretBox";
 
@@ -112,7 +112,7 @@ export async function POST(req: NextRequest) {
       ...(needsUpgrade(record.secret, []).secret ? { secret: sealSecret(secret) } : {}),
     }).eq("user_id", user_id);
 
-    await writeAuditLog(db, {
+    const auditFailed = await requireAudit(db, {
       org_id,
       event_type:    "org_settings_changed",
       actor_id:      user_id,
@@ -121,6 +121,7 @@ export async function POST(req: NextRequest) {
       resource_id:   user_id,
       payload:       { action: "2fa_enabled" },
     });
+    if (auditFailed) return auditFailed;
 
     return NextResponse.json({
       ok:           true,
@@ -146,7 +147,7 @@ export async function POST(req: NextRequest) {
 
     await db.from("user_2fa").update({ enabled: false, secret: null, backup_codes: [] }).eq("user_id", user_id);
 
-    await writeAuditLog(db, {
+    const auditFailed2 = await requireAudit(db, {
       org_id,
       event_type:    "org_settings_changed",
       actor_id:      user_id,
@@ -155,6 +156,7 @@ export async function POST(req: NextRequest) {
       resource_id:   user_id,
       payload:       { action: "2fa_disabled" },
     });
+    if (auditFailed2) return auditFailed2;
 
     return NextResponse.json({ ok: true });
   }

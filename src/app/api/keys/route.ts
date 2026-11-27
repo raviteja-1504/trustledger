@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import crypto from "crypto";
 
@@ -54,12 +54,14 @@ export async function POST(req: NextRequest) {
 
   if (insErr) return NextResponse.json({ error: "api_key_create_failed" }, { status: 500 });
 
-  await writeAuditLog(db, {
+  // A key with no record of its creation must not exist: if the entry cannot be written the key is removed again.
+  const auditFailed = await requireAudit(db, {
     org_id, event_type: "api_key_created",
     actor_id: user_id ?? null, actor_email: actor_email ?? null,
     resource_type: "api_key", resource_id: data!.id,
     payload: { name: body.name },
-  });
+  }, { undo: async () => { const { error } = await db.from("api_keys").delete().eq("id", data!.id).eq("org_id", org_id); if (error) throw error; } });
+  if (auditFailed) return auditFailed;
 
   // Return raw key ONCE — never stored
   return NextResponse.json({ ...data, raw_key: rawKey });
@@ -76,14 +78,17 @@ export async function DELETE(req: NextRequest) {
   if (!body.id) return NextResponse.json({ error: "missing_id" }, { status: 400 });
 
   const db = createServiceClient();
-  await db.from("api_keys").update({ revoked: true }).eq("id", body.id).eq("org_id", org_id);
+  const { error: revokeErr } = await db.from("api_keys").update({ revoked: true }).eq("id", body.id).eq("org_id", org_id);
+  if (revokeErr) return NextResponse.json({ error: "api_key_revoke_failed" }, { status: 500 });
 
-  await writeAuditLog(db, {
+  // A revocation stays in force even if it cannot be recorded (the safe direction); the caller is told it was not recorded.
+  const auditFailed = await requireAudit(db, {
     org_id, event_type: "api_key_revoked",
     actor_id: user_id ?? null, actor_email: actor_email ?? null,
     resource_type: "api_key", resource_id: body.id,
     payload: {},
   });
+  if (auditFailed) return auditFailed;
 
   return NextResponse.json({ ok: true });
 }

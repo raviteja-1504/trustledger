@@ -40,6 +40,9 @@ export interface AttestParams {
 export type AttestOutcome =
   | { ok: true; attestation_id: string; payload_hash: string; attested_at: string; signed?: boolean }
   | { ok: false; reason: "scan_not_found" | "insert_failed"; detail?: unknown }
+  /** The sign-off row exists (attestations are immutable) but its audit entry could not be written, so nothing that depends on it
+   *  (resolved violations, an unblocked merge) was done, and the request is reported as failed. Repeating it completes the job. */
+  | { ok: false; reason: "audit_unavailable" }
   | { ok: false; reason: "forbidden"; risk_score: string };
 
 /**
@@ -193,6 +196,28 @@ export async function performAttestation(db: Db, params: AttestParams, opts: { d
     attestation = inserted as { id: string; created_at: string };
   }
 
+  // The audit entry is REQUIRED, and written before anything that acts on the sign-off (resolving violations, unblocking the
+  // merge): if it cannot be written, none of that happens and the attestation is reported as failed. The sign-off row itself
+  // cannot be removed (attestations are immutable); repeating the request finds it and finishes the rest.
+  try {
+    await writeAuditLog(db, {
+      org_id,
+      event_type:    "attestation",
+      actor_id:      user_id ?? null,
+      actor_email:   reviewer_email,
+      resource_type: "attestation",
+      resource_id:   attestation.id,
+      payload: {
+        scan_id, file_path,
+        repo:         scan.repo_full_name,
+        risk_score:   file?.risk_score ?? "UNKNOWN",
+        payload_hash: payloadHash,
+      },
+    }, { strict: true });
+  } catch {
+    return { ok: false, reason: "audit_unavailable" };
+  }
+
   // The sign-off covers this file's CONTENT: every scan of this repo where the file is byte-identical (the same
   // content_hash) -- a newer push or PR that didn't touch it, or an older scan of the same code. It used to resolve
   // the file's violations in EVERY scan of the repo, so another PR's different version of the file lost its
@@ -275,20 +300,6 @@ export async function performAttestation(db: Db, params: AttestParams, opts: { d
       .eq("repo", scan.repo_full_name)
       .eq("alert_type", "policy")
       .in("status", ["firing", "acknowledged", "snoozed"])),
-    writeAuditLog(db, {
-      org_id,
-      event_type:    "attestation",
-      actor_id:      user_id ?? null,
-      actor_email:   reviewer_email,
-      resource_type: "attestation",
-      resource_id:   attestation.id,
-      payload: {
-        scan_id, file_path,
-        repo:         scan.repo_full_name,
-        risk_score:   file?.risk_score ?? "UNKNOWN",
-        payload_hash: payloadHash,
-      },
-    }),
     // Invalidate dashboard cache so new attestation is reflected immediately —
     // must cover every day-window the dashboard UI can request (7/30/90).
     ...[7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))),

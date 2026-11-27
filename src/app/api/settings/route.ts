@@ -1,7 +1,7 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole, requirePermission } from "../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { checkMemberSlot } from "@/lib/planGate";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { safeError } from "@/lib/errors";
@@ -94,7 +94,7 @@ export async function PATCH(req: NextRequest) {
 
   if (upErr || !data) return NextResponse.json({ error: "update_failed" }, { status: 500 });
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id,
     event_type:    "org_settings_changed",
     actor_id:      user_id ?? null,
@@ -103,6 +103,7 @@ export async function PATCH(req: NextRequest) {
     resource_id:   org_id,
     payload: updates,
   });
+  if (auditFailed) return auditFailed;
 
   return NextResponse.json({ ok: true });
 }
@@ -166,7 +167,7 @@ export async function POST(req: NextRequest) {
       role:     body.role ?? "developer",
     }, { onConflict: "org_id,user_id" });
 
-    await writeAuditLog(db, {
+    const auditFailed2 = await requireAudit(db, {
       org_id,
       event_type:    "user_added",
       actor_id:      user_id ?? null,
@@ -175,14 +176,16 @@ export async function POST(req: NextRequest) {
       resource_id:   invited.user.id,
       payload: { email: body.email, role: body.role ?? "developer" },
     });
+    if (auditFailed2) return auditFailed2;
 
     return NextResponse.json({ ok: true, user_id: invited.user.id });
   }
 
   if (body.action === "update_member_role") {
     if (!body.user_id || !body.role) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
-    await db.from("org_members").update({ role: body.role }).eq("user_id", body.user_id).eq("org_id", org_id);
-    await writeAuditLog(db, {
+    const { error: roleErr } = await db.from("org_members").update({ role: body.role }).eq("user_id", body.user_id).eq("org_id", org_id);
+    if (roleErr) return NextResponse.json({ error: "update_failed" }, { status: 500 });
+    const auditFailed3 = await requireAudit(db, {
       org_id,
       event_type:    "member_role_changed",
       actor_id:      user_id ?? null,
@@ -191,13 +194,15 @@ export async function POST(req: NextRequest) {
       resource_id:   body.user_id,
       payload: { new_role: body.role },
     });
+    if (auditFailed3) return auditFailed3;
     return NextResponse.json({ ok: true });
   }
 
   if (body.action === "remove_member") {
     if (!body.user_id) return NextResponse.json({ error: "missing_user_id" }, { status: 400 });
-    await db.from("org_members").delete().eq("user_id", body.user_id).eq("org_id", org_id);
-    await writeAuditLog(db, {
+    const { error: removeErr } = await db.from("org_members").delete().eq("user_id", body.user_id).eq("org_id", org_id);
+    if (removeErr) return NextResponse.json({ error: "update_failed" }, { status: 500 });
+    const auditFailed4 = await requireAudit(db, {
       org_id,
       event_type:    "user_removed",
       actor_id:      user_id ?? null,
@@ -206,6 +211,7 @@ export async function POST(req: NextRequest) {
       resource_id:   body.user_id,
       payload: {},
     });
+    if (auditFailed4) return auditFailed4;
     return NextResponse.json({ ok: true });
   }
 

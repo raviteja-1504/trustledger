@@ -81,6 +81,7 @@ async function run() {
       retentionDeleted += totalDeleted(result);
       await db.from("organizations").update({ retention_policy: { ...policy, last_enforced_at: result.at, last_result: result } }).eq("id", org.id);
       if (totalDeleted(result) > 0 || result.failed.length > 0) {
+        // audit: best-effort (system retention housekeeping run by the platform, no actor: not one of the actions that must fail without a record)
         await writeAuditLog(db, {
           org_id: org.id, event_type: "org_settings_changed", actor_id: null, actor_email: "system",
           resource_type: "data_deletion", payload: { automatic: true, ...result },

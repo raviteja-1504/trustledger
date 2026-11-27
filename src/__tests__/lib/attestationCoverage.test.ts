@@ -119,3 +119,31 @@ it("a scan still waiting on another file keeps its alert and check", async () =>
   expect(rows(db, "alerts").find(a => a.scan_id === "s2")?.status).toBe("firing");
   expect((updateCheckRun as jest.Mock).mock.calls.map(c => c[3])).toEqual([11]);
 });
+
+describe("the audit entry is required", () => {
+  it("when it cannot be written, nothing acts on the sign-off (no resolved violation, alert or unblocked check) and the result is a failure", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { writeAuditLog } = require("@/lib/audit") as { writeAuditLog: jest.Mock };
+    writeAuditLog.mockRejectedValueOnce(new Error("audit_write_failed: permission denied"));
+    const db = seed();
+    const res = await performAttestation(db.client as never, {
+      org_id: ORG, user_id: "u1", scan_id: "s1", file_path: "auth.ts", reviewer_email: "rev@a.test", permissions: ALL_PERMISSIONS,
+    });
+    expect(res).toEqual({ ok: false, reason: "audit_unavailable" });
+    expect(rows(db, "violations").every(v => v.status === "open")).toBe(true);
+    expect(rows(db, "alerts").every(a => a.status === "firing")).toBe(true);
+    expect(updateCheckRun).not.toHaveBeenCalled();
+    expect(writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ event_type: "attestation" }), { strict: true });
+  });
+
+  it("repeating it afterwards finds the sign-off and finishes the job", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { writeAuditLog } = require("@/lib/audit") as { writeAuditLog: jest.Mock };
+    writeAuditLog.mockRejectedValueOnce(new Error("audit_write_failed"));
+    const db = seed();
+    const params = { org_id: ORG, user_id: "u1", scan_id: "s1", file_path: "auth.ts", reviewer_email: "rev@a.test", permissions: ALL_PERMISSIONS };
+    expect((await performAttestation(db.client as never, params)).ok).toBe(false);
+    expect((await performAttestation(db.client as never, params)).ok).toBe(true);
+    expect(rows(db, "violations").filter(v => v.status === "resolved").map(v => v.scan_id).sort()).toEqual(["s1", "s2"]);
+  });
+});

@@ -8,7 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { newScimToken } from "@/lib/scimAuth";
 
@@ -60,10 +60,12 @@ export async function POST(req: NextRequest) {
     if (notSetUp(error)) return NextResponse.json({ error: "scim_not_set_up", message: SETUP_HINT }, { status: 422 });
     return safeError(error, { code: "scim_token_create_failed", message: "We couldn't create a SCIM token. Please try again." });
   }
-  await writeAuditLog(db, {
+  // A token with no record of its creation must not exist: if the entry cannot be written the token is removed again.
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "api_key_created", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "scim_token", resource_id: prefix, payload: { prefix },
-  });
+  }, { undo: async () => { const { error: undoErr } = await db.from("scim_tokens").delete().eq("org_id", auth.org_id); if (undoErr) throw undoErr; } });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ token, prefix }, { status: 201 });
 }
 
@@ -73,9 +75,11 @@ export async function DELETE(req: NextRequest) {
   const db = createServiceClient();
   const { error } = await db.from("scim_tokens").delete().eq("org_id", auth.org_id);
   if (error && !notSetUp(error)) return safeError(error, { code: "scim_token_revoke_failed", message: "We couldn't revoke the SCIM token. Please try again." });
-  await writeAuditLog(db, {
+  // A revocation stays in force even if it cannot be recorded (the safe direction); the caller is told it was not recorded.
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "api_key_revoked", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "scim_token", payload: {},
   });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ ok: true });
 }

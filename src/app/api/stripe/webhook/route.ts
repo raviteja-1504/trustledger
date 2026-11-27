@@ -80,6 +80,7 @@ export async function POST(req: NextRequest) {
 
         const plan = session.metadata?.plan ?? "starter";
         await updateOrgPlan(orgId, plan);
+        // audit: best-effort (billing sync driven by Stripe: not one of the actions that must fail without a record)
         await writeAuditLog(db, {
           org_id:      orgId,
           event_type:  "org_settings_changed",
@@ -105,6 +106,7 @@ export async function POST(req: NextRequest) {
         const priceId = sub.items.data[0]?.price.id ?? "";
         const plan    = PLAN_NAMES[priceId] ?? sub.metadata?.plan ?? "starter";
         await updateOrgPlan(orgId, plan);
+        // audit: best-effort (billing sync driven by Stripe: not one of the actions that must fail without a record)
         await writeAuditLog(db, {
           org_id:      orgId,
           event_type:  "org_settings_changed",
@@ -123,6 +125,7 @@ export async function POST(req: NextRequest) {
         if (!orgId) break;
 
         await updateOrgPlan(orgId, "trial");
+        // audit: best-effort (billing sync driven by Stripe: not one of the actions that must fail without a record)
         await writeAuditLog(db, {
           org_id:      orgId,
           event_type:  "org_settings_changed",

@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { checkDomainTxt, domainClaimError, newVerificationToken, normalizeDomain, verificationRecord } from "@/lib/ssoDomains";
 import { SsoProviderError, setSsoProviderDomains } from "@/lib/supabaseSso";
@@ -101,10 +101,11 @@ export async function PATCH(req: NextRequest) {
   }
   try { await syncProvider(db, auth.org_id); }
   catch (e) { if (!(e instanceof SsoProviderError)) throw e; /* verified either way; the next IdP save re-sends domains */ }
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "sso_domain", resource_id: domain, payload: { verified: true },
   });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ domain, verified: true });
 }
 
@@ -117,9 +118,10 @@ export async function DELETE(req: NextRequest) {
   await db.from("sso_domains").delete().eq("org_id", auth.org_id).eq("domain", domain);
   try { await syncProvider(db, auth.org_id); }
   catch (e) { if (!(e instanceof SsoProviderError)) throw e; }
-  await writeAuditLog(db, {
+  const auditFailed2 = await requireAudit(db, {
     org_id: auth.org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "sso_domain", resource_id: domain, payload: { removed: true },
   });
+  if (auditFailed2) return auditFailed2;
   return NextResponse.json({ ok: true });
 }

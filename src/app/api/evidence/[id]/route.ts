@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import {
   rowToEvidenceRecord,
@@ -107,14 +108,16 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     const updated = markRevoked(record, body.reason);
     const updatedRow = evidenceRecordToRow(updated);
 
-    await db.from("evidence_log").update({ note: updatedRow.note }).eq("id", id).eq("org_id", auth.org_id);
+    const { error: revokeErr } = await db.from("evidence_log").update({ note: updatedRow.note }).eq("id", id).eq("org_id", auth.org_id);
+    if (revokeErr) return NextResponse.json({ error: "revoke_failed" }, { status: 500 });
 
-    await writeAuditLog(db, {
+    const auditFailed = await requireAudit(db, {
       org_id: auth.org_id, event_type: "evidence_deleted",
       actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
       resource_type: "evidence_log", resource_id: id,
       payload: { action: "revoke", reason: body.reason },
     });
+    if (auditFailed) return auditFailed;
 
     return NextResponse.json({ ok: true, verification_status: "revoked" });
   }

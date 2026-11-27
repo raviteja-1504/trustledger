@@ -12,7 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import {
   SsoProviderError, createSsoProvider, deleteSsoProvider, metadataInputError, serviceProviderDetails,
@@ -138,7 +138,7 @@ export async function PUT(req: NextRequest) {
   if (saveErr) return safeError(saveErr, { code: "sso_save_failed", message: "We couldn't save SSO settings. Please try again." });
   await invalidateSsoEnforcement(auth.org_id);
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "sso", resource_id: next.provider_id ?? undefined,
     payload: {
@@ -146,6 +146,7 @@ export async function PUT(req: NextRequest) {
       jit_enabled: next.jit_enabled, jit_role: next.jit_role, enforce_sso: next.enforce_sso,
     },
   });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ connection: saved });
 }
 
@@ -165,9 +166,10 @@ export async function DELETE(req: NextRequest) {
   }
   await db.from("sso_connections").delete().eq("org_id", auth.org_id);
   await invalidateSsoEnforcement(auth.org_id);
-  await writeAuditLog(db, {
+  const auditFailed2 = await requireAudit(db, {
     org_id: auth.org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "sso", resource_id: conn.provider_id ?? undefined, payload: { removed: true, idp: conn.idp_entity_id },
   });
+  if (auditFailed2) return auditFailed2;
   return NextResponse.json({ ok: true });
 }

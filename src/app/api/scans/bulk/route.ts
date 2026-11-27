@@ -13,6 +13,7 @@ import { verifyApiKey, permissionsFor, requirePermission } from "../../_middlewa
 import { attestPermissionFor, canAttestAny } from "@/lib/permissions";
 import { buildAttestationHash } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    await writeAuditLog(db, {
+    const auditFailed = await requireAudit(db, {
       org_id,
       event_type:    "attestation",
       actor_id:      user_id ?? null,
@@ -116,6 +117,7 @@ export async function POST(req: NextRequest) {
       resource_id:   body.scan_id,
       payload: { bulk: true, files_attested: results.length },
     });
+    if (auditFailed) return auditFailed;
 
     // Invalidate dashboard cache
     await cacheDel(cacheKeys.dashboard(org_id, 90));

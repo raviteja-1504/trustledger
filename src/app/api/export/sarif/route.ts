@@ -14,7 +14,7 @@ import { buildSarifReport, type SarifSourceFile } from "@/lib/sarif";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { attachTriage } from "@/lib/findingLifecycle";
 import { getFixSuggestions } from "@/lib/scanner";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { allRows } from "@/lib/allRows";
 
 export async function GET(req: NextRequest) {
@@ -56,11 +56,12 @@ export async function GET(req: NextRequest) {
     informationUri: process.env.NEXT_PUBLIC_APP_URL ?? "https://github.com/trustledger",
   }, fixesById);
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id, event_type: "data_exported", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "scan", resource_id: scanId,
     payload: { export_type: "sarif", format: "sarif", scan_id: scanId, repo: scan.repo_full_name, findings: allIndicators.length },
   });
+  if (auditFailed) return auditFailed;
 
   return new NextResponse(JSON.stringify(sarif, null, 2), {
     headers: {

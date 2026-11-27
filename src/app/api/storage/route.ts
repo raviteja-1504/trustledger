@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { orgStorageKey, orgStorageFolder } from "@/lib/storagePath";
 
@@ -137,18 +138,20 @@ export async function DELETE(req: NextRequest) {
   if (!safePath) return NextResponse.json({ error: "invalid_path" }, { status: 400 });
   const db       = createServiceClient();
 
-  const { error: delErr } = await db.storage.from(BUCKET).remove([safePath]);
-  if (delErr) return safeError(delErr, { code: "storage_delete_failed", message: "We couldn't delete that file. Please try again." });
-
-  await writeAuditLog(db, {
+  // Deleting a file cannot be undone: it is recorded BEFORE it happens, and not deleted unless the record exists.
+  const auditFailed = await requireAudit(db, {
     org_id,
     event_type:    "evidence_deleted",
     actor_id:      user_id ?? null,
     actor_email:   actor_email ?? null,
     resource_type: "evidence",
     resource_id:   safePath,
-    payload: { action: "deleted", path: safePath },
+    payload: { action: "delete", path: safePath },
   });
+  if (auditFailed) return auditFailed;
+
+  const { error: delErr } = await db.storage.from(BUCKET).remove([safePath]);
+  if (delErr) return safeError(delErr, { code: "storage_delete_failed", message: "We couldn't delete that file. Please try again." });
 
   return NextResponse.json({ ok: true });
 }

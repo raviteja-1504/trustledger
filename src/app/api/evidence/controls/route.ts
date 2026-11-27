@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 import { getFrameworkMapping } from "@/lib/controlMapping";
 import { isValidOwnerEmail } from "@/lib/controlTracking";
@@ -72,11 +72,12 @@ export async function PUT(req: NextRequest) {
       assigned_by_email: auth.actor_email ?? null, assigned_at: new Date().toISOString(),
     }, { onConflict: "org_id,framework_id,control_id" });
     if (upErr) throw upErr;
-    await writeAuditLog(db, {
+    const auditFailed = await requireAudit(db, {
       org_id: auth.org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
       resource_type: "control_owner", resource_id: `${fw.framework_id}:${body.control_id}`,
       payload: { framework: fw.framework_id, control_id: body.control_id, owner, previous_owner: previous },
     });
+    if (auditFailed) return auditFailed;
     return NextResponse.json({ ok: true, framework_id: fw.framework_id, control_id: body.control_id, owner, previous_owner: previous });
   } catch (err) {
     return safeError(err, { code: "control_owner_failed", message: "We couldn't save that owner right now. Please try again." });
@@ -100,11 +101,12 @@ export async function DELETE(req: NextRequest) {
     if (!previous) return NextResponse.json({ ok: true, removed: false });
     const { error: delErr } = await db.from("control_owners").delete().eq("org_id", auth.org_id).eq("framework_id", fw.framework_id).eq("control_id", controlId);
     if (delErr) throw delErr;
-    await writeAuditLog(db, {
+    const auditFailed2 = await requireAudit(db, {
       org_id: auth.org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
       resource_type: "control_owner", resource_id: `${fw.framework_id}:${controlId}`,
       payload: { framework: fw.framework_id, control_id: controlId, owner: null, previous_owner: previous },
     });
+    if (auditFailed2) return auditFailed2;
     return NextResponse.json({ ok: true, removed: true, previous_owner: previous });
   } catch (err) {
     return safeError(err, { code: "control_owner_failed", message: "We couldn't remove that owner right now. Please try again." });

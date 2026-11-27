@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { checkRateLimit } from "@/lib/rateLimit";
-import { writeAuditLog } from "@/lib/audit";
+import { requireAudit } from "@/lib/auditRequired";
 import { safeError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
@@ -71,7 +71,7 @@ export async function POST(req: NextRequest) {
     return safeError(updateErr, { code: "claim_admin_failed", message: "We couldn't make you an admin right now. Please try again." });
   }
 
-  await writeAuditLog(db, {
+  const auditFailed = await requireAudit(db, {
     org_id:        auth.org_id,
     event_type:    "member_role_changed",
     actor_id:      auth.user_id,
@@ -80,6 +80,7 @@ export async function POST(req: NextRequest) {
     resource_id:   auth.user_id,
     payload:       { via: "claim_admin", to: "admin" },
   });
+  if (auditFailed) return auditFailed;
 
   return NextResponse.json({ ok: true });
 }

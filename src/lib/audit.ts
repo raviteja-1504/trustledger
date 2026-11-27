@@ -53,7 +53,24 @@ export type AuditEventType =
   | "org_deletion_requested" | "org_deleted"
   | "audit_forks_reviewed";
 
-interface AuditEntry {
+/**
+ * Events that must be on record: an action that changes who can do what, how the product is configured, what leaves it, or
+ * what is destroyed. A route that writes one of these uses requireAudit() (lib/auditRequired.ts) -- the action is reported as
+ * failed (or undone) when its audit entry cannot be written -- and never the best-effort writeAuditLog() alone.
+ * src/__tests__/lib/auditRequired.test.ts fails the build when a route writes one of them any other way.
+ * `org_settings_changed` covers configuration of every kind; a call that is genuinely system housekeeping (billing sync, health
+ * cron, checkpoint bookkeeping) is marked `audit: best-effort` in a comment where it is written.
+ */
+export const REQUIRED_AUDIT_EVENTS: ReadonlySet<AuditEventType> = new Set<AuditEventType>([
+  "attestation",
+  "member_invited", "member_role_changed", "member_removed", "user_added", "user_removed",
+  "api_key_created", "api_key_revoked",
+  "policy_change", "ai_tool_policy_changed", "org_settings_changed", "exception_created", "exception_resolved",
+  "data_exported",
+  "evidence_deleted", "repo_disabled", "org_deletion_requested", "org_deleted", "audit_forks_reviewed",
+]);
+
+export interface AuditEntry {
   org_id:        string;
   event_type:    AuditEventType;
   actor_id?:     string | null;
