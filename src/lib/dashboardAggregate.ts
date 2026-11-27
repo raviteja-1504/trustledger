@@ -265,12 +265,15 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     }
   }
 
-  // Risk Distribution totals. Each flagged file counted once (get_risk_trend keeps a file's LATEST scan only), so the period's totals are the sum of
-  // its weeks -- the same numbers the chart shows. (They used to be separate counts over every scan's rows: a PR scanned three
-  // times counted every file three times.)
-  const risk_totals = risk_trend.reduce(
-    (t, p) => ({ critical_count: t.critical_count + p.critical_count, high_count: t.high_count + p.high_count, medium_count: t.medium_count + p.medium_count }),
-    { critical_count: 0, high_count: 0, medium_count: 0 });
+  // Risk Distribution totals: the files flagged NOW -- the latest scan of every PR, each repo+path once (get_risk_totals) -- not
+  // a sum of the weeks, which would count a PR once for every week it was scanned in. If the function is not there yet (migration
+  // not applied) the most recent week stands in: that is also a point-in-time state.
+  const { data: totalRows } = scanIdsInRange.length === 0 ? { data: [] } : await db
+    .rpc("get_risk_totals", { p_scan_ids: scanIdsInRange }) as { data: Array<{ critical_count: number; high_count: number; medium_count: number }> | null };
+  const lastWeek = risk_trend[risk_trend.length - 1];
+  const risk_totals = totalRows?.[0]
+    ? { critical_count: Number(totalRows[0].critical_count), high_count: Number(totalRows[0].high_count), medium_count: Number(totalRows[0].medium_count) }
+    : { critical_count: lastWeek?.critical_count ?? 0, high_count: lastWeek?.high_count ?? 0, medium_count: lastWeek?.medium_count ?? 0 };
 
   // Top risk files — dedupe by repo+file_path, keeping each file's most
   // recent scan (riskFiles is ordered created_at desc), then rank by AI%.

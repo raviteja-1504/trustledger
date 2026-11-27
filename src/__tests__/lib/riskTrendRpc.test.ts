@@ -33,16 +33,36 @@ describe("the chart over a 90-day period", () => {
   });
 });
 
-describe("get_risk_trend counts each file once", () => {
-  const sql = () => {
+describe("risk trend and totals count the CURRENT state of each PR", () => {
+  const latestSql = () => {
     const files = fs.readdirSync(DIR).filter(f => /CREATE OR REPLACE FUNCTION get_risk_trend/i.test(fs.readFileSync(path.join(DIR, f), "utf8"))).sort();
-    return fs.readFileSync(path.join(DIR, files[files.length - 1]), "utf8").split(/\$\$/)[1];
+    return fs.readFileSync(path.join(DIR, files[files.length - 1]), "utf8");
   };
-  it("keeps one row per repository + PR + path (its latest scan), before filtering by risk", () => {
-    const body = sql();
-    expect(body).toMatch(/DISTINCT ON \(s\.repo_full_name, COALESCE\(s\.pr_number, 0\), f\.file_path\)/);
-    expect(body).toMatch(/ORDER BY s\.repo_full_name, COALESCE\(s\.pr_number, 0\), f\.file_path, s\.created_at DESC/);
-    // the risk filter is applied AFTER the latest row is chosen, so a file fixed in a later scan is not counted
-    expect(body.indexOf("DISTINCT ON")).toBeLessThan(body.indexOf("risk_score IN"));
+  /** The text between the $$ pair of the named function. */
+  const fn = (name: string) => {
+    const sql = latestSql();
+    const at = sql.indexOf("FUNCTION " + name + "(p_scan_ids uuid[])");
+    const open = sql.indexOf("$$", at), close = sql.indexOf("$$", open + 2);
+    return at < 0 ? "" : sql.slice(open + 2, close);
+  };
+
+  it("the weekly trend takes each PR's latest scan of the week, then each repo+path once", () => {
+    const body = fn("get_risk_trend");
+    expect(body).toContain("DISTINCT ON (s.repo_full_name, COALESCE(s.pr_number, 0), date_trunc('week', s.created_at))");
+    expect(body).toContain("DISTINCT ON (wk.week_start, s.repo_full_name, f.file_path)");
+    expect(body.lastIndexOf("DISTINCT ON")).toBeLessThan(body.indexOf("risk_score IN"));   // risk filter AFTER choosing the scan
+    expect(body).not.toMatch(/LIMIT/i);
+  });
+
+  it("the totals take the latest scan of every PR in the period, each repo+path once", () => {
+    const body = fn("get_risk_totals");
+    expect(body).toContain("DISTINCT ON (s.repo_full_name, COALESCE(s.pr_number, 0)) s.id");
+    expect(body).toContain("DISTINCT ON (s.repo_full_name, f.file_path)");
+  });
+
+  it("is callable by the service role only", () => {
+    const sql = latestSql();
+    expect(sql).toContain("GRANT EXECUTE ON FUNCTION get_risk_totals(uuid[]) TO service_role;");
+    expect(sql).toContain("REVOKE ALL ON FUNCTION get_risk_totals(uuid[]) FROM PUBLIC;");
   });
 });

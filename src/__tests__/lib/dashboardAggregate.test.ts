@@ -170,20 +170,26 @@ describe("the SLA page's list (sla_open_files) is the dashboard's own SLA set", 
 });
 
 describe("risk trend and totals", () => {
-  it("totals are the sum of the weekly (de-duplicated) trend, so the donut matches the chart", async () => {
-    // get_risk_trend counts each file once, from its latest scan; the totals must come from the same rows, not from a
-    // separate count over every scan's files (a PR scanned three times counted each file three times)
-    seed({}, { rpc: { get_risk_trend: () => [
-      { week_start: "2026-11-23", critical_count: 1, high_count: 4, medium_count: 2 },
-      { week_start: "2026-11-16", critical_count: 0, high_count: 3, medium_count: 5 },
-    ] } });
+  const weeks = [
+    { week_start: "2026-11-23", critical_count: 1, high_count: 4, medium_count: 2 },
+    { week_start: "2026-11-16", critical_count: 0, high_count: 3, medium_count: 5 },
+  ];
+
+  it("the totals beside the chart are the files flagged now (get_risk_totals), not a sum of the weeks", async () => {
+    // a PR scanned in several weeks is in each week's bar; summing the bars would count it once per week
+    seed({}, { rpc: { get_risk_trend: () => weeks, get_risk_totals: () => [{ critical_count: 1, high_count: 4, medium_count: 2 }] } });
     const data = await fetchDashboard(ORG, 30, null);
     expect(data.risk_trend.map(t => t.high_count)).toEqual([3, 4]);
-    expect(data.risk_totals).toEqual({ critical_count: 1, high_count: 7, medium_count: 7 });
+    expect(data.risk_totals).toEqual({ critical_count: 1, high_count: 4, medium_count: 2 });
+  });
+
+  it("until the totals function exists, the most recent week stands in -- never the sum of the weeks", async () => {
+    seed({}, { rpc: { get_risk_trend: () => weeks } });   // get_risk_totals returns no row
+    expect((await fetchDashboard(ORG, 30, null)).risk_totals).toEqual({ critical_count: 1, high_count: 4, medium_count: 2 });
   });
 
   it("is all zeros when nothing is flagged", async () => {
-    seed({}, { rpc: { get_risk_trend: () => [] } });
+    seed({}, { rpc: { get_risk_trend: () => [], get_risk_totals: () => [] } });
     expect((await fetchDashboard(ORG, 30, null)).risk_totals).toEqual({ critical_count: 0, high_count: 0, medium_count: 0 });
   });
 });
