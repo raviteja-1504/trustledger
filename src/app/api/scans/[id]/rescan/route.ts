@@ -17,6 +17,7 @@ import { enqueueScan } from "@/lib/queue";
 import { getInstallationToken, getPRHeadSha, getPullRequest, createCheckRun } from "@/lib/github";
 import { runWithTrace, traceIdFrom, currentTrace } from "@/lib/trace";
 import { recordEvent } from "@/lib/opsEvents";
+import { checkScanAllowed } from "@/lib/planGate";
 
 const MIN_INTERVAL_MS = 60_000;
 
@@ -54,6 +55,12 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ id: string }> }
   const last = recent?.[0]?.created_at ? Date.parse(recent[0].created_at) : 0;
   if (Date.now() - last < MIN_INTERVAL_MS) {
     return NextResponse.json({ error: "rescan_too_soon", message: "This PR was scanned less than a minute ago. Try again shortly." }, { status: 429 });
+  }
+
+  // A rescan is a scan like any other: it is counted against the plan's monthly scans, so it is refused once they are used.
+  const verdict = await checkScanAllowed(db, auth.org_id, scan.repo_full_name);
+  if (!verdict.allowed) {
+    return NextResponse.json({ error: `plan_limit_${verdict.reason}`, message: `${verdict.title}. ${verdict.summary}` }, { status: 403 });
   }
 
   try {

@@ -19,6 +19,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { runWithTrace, traceIdFrom, currentTrace } from "@/lib/trace";
 import { recordEvent } from "@/lib/opsEvents";
+import { checkScanAllowed } from "@/lib/planGate";
 
 const MIN_INTERVAL_MS = 60_000;
 
@@ -65,6 +66,12 @@ async function handle(req: NextRequest) {
     }
     if (last && Date.now() - Date.parse(last.created_at) < MIN_INTERVAL_MS) {
       return NextResponse.json({ error: "scan_too_soon", message: "This PR was scanned less than a minute ago. Try again shortly." }, { status: 429 });
+    }
+
+    // A rescan is a scan like any other: it is counted against the plan's monthly scans, so it is refused once they are used.
+    const verdict = await checkScanAllowed(db, auth.org_id, target.repo);
+    if (!verdict.allowed) {
+      return NextResponse.json({ error: `plan_limit_${verdict.reason}`, message: `${verdict.title}. ${verdict.summary}` }, { status: 403 });
     }
 
     let checkRunId: number | null = null;
