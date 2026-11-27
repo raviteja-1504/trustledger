@@ -97,6 +97,16 @@ describe("sign-ins", () => {
     expect(logins[1].prev_hash).toBe(logins[0].entry_hash);
   });
 
+  it("the browser calling bootstrap several times AT ONCE for one new session writes one user_login, not a burst", async () => {
+    users["u-admin"] = { id: "u-admin", email: "admin@acme.dev", email_confirmed_at: "2026-10-01", app_metadata: { provider: "github" } };
+    const call = () => bootstrap(req("/api/auth/bootstrap", { method: "POST", body: {}, auth: token("u-admin", "s-burst") }));
+    const results = await Promise.all([call(), call(), call()]);
+    expect(results.map(r => r.status)).toEqual([200, 200, 200]);
+    const logins = audit("user_login");
+    expect(logins).toHaveLength(1);
+    expect(logins[0]).toMatchObject({ resource_id: "s-burst" });
+  });
+
   it("someone with no org gets no login entry", async () => {
     users.stranger = { id: "stranger", email: "x@y.dev", email_confirmed_at: "2026-10-01", app_metadata: { provider: "email" } };
     await bootstrap(req("/api/auth/bootstrap", { method: "POST", body: {}, auth: token("stranger", "s1") }));

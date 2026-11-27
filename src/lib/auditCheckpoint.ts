@@ -120,7 +120,7 @@ export function verifyCheckpointedChain(
   const sorted = [...checkpoints].sort((a, b) => a.payload.sequence - b.payload.sequence);
   const forked = chain.status === "FORK_DETECTED";
   const flags = { invalid: false, untrusted: false, truncated: false, modified: !chain.valid && !forked, forked };
-  if (forked) problems.push({ sequence: null, code: "chain_forked", detail: `${chain.concurrent} audit entr${chain.concurrent === 1 ? "y shares" : "ies share"} a parent with an earlier one, from entry ${chain.fork_at ?? "?"}` });
+  if (forked) problems.push({ sequence: null, code: "chain_forked", detail: `${chain.unreviewed_forks ?? chain.concurrent} audit entr${(chain.unreviewed_forks ?? chain.concurrent) === 1 ? "y shares" : "ies share"} a parent with an earlier one, from entry ${chain.fork_at ?? "?"}` });
   else if (!chain.valid) problems.push({ sequence: null, code: "chain_" + (chain.reason ?? "invalid"), detail: `audit chain failed at entry ${chain.broken_at ?? "?"}` });
 
   let prev: SignedCheckpoint | null = null;

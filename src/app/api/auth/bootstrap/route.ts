@@ -71,15 +71,20 @@ export async function POST(req: NextRequest) {
 
   const sessionId = getJwtSessionId(token);
   if (sessionId) {
-    const { data: current } = await db.from("org_members").select("org_id, email, active_session_id").eq("user_id", user.id).maybeSingle() as
-      { data: { org_id: string; email: string | null; active_session_id: string | null } | null };
-    const previousSession = current?.active_session_id ?? null;
-    await db
-      .from("org_members")
-      .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
-      .eq("user_id", user.id);
-    // One audit entry per new session (a repeated call for the same session is not a new sign-in).
-    if (current && previousSession !== sessionId) {
+    // Claim the session atomically: the update only matches a row whose active session is something else, so when the
+    // browser calls bootstrap twice at once (two tabs, a retry) exactly ONE call changes the row and gets it back. A
+    // read-then-update here let both calls see the old session, and both wrote a sign-in entry -- the duplicate
+    // "user_login" pairs, written within milliseconds of each other, that forked the audit chain.
+    const claim = (filter: "null" | "other") => {
+      const q = db.from("org_members").update({ active_session_id: sessionId, active_session_at: new Date().toISOString() }).eq("user_id", user.id);
+      return (filter === "null" ? q.is("active_session_id", null) : q.neq("active_session_id", sessionId)).select("org_id, email");
+    };
+    type Claimed = { data: Array<{ org_id: string; email: string | null }> | null };
+    const fromNone = await claim("null") as Claimed;
+    const claimed = fromNone.data?.length ? fromNone : await claim("other") as Claimed;
+    const current = claimed.data?.[0] ?? null;
+    // One audit entry per new session (a repeated call for the same session claims nothing, so writes nothing).
+    if (current) {
       await writeAuditLog(db, {
         org_id: current.org_id, event_type: "user_login",
         actor_id: user.id, actor_email: current.email ?? user.email ?? null,

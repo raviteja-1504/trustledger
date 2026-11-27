@@ -96,15 +96,16 @@ describe("verifyAuditChain + writeAuditLog", () => {
     const db = {
       from: () => {
         let insertRow: Record<string, unknown> | null = null;
-        let window: [number, number] | null = null, desc = false, lim: number | null = null;
+        let window: [number, number] | null = null, desc = false, lim: number | null = null, head = false;
         const q = {
-          select: () => q, eq: () => q,
+          select: (_cols?: string, o?: { head?: boolean }) => { head = !!o?.head; return q; }, eq: () => q,
           order: (_c: string, o?: { ascending?: boolean }) => { desc = o?.ascending === false; return q; },
           limit: (n: number) => { lim = n; return q; },
           range: (a: number, b: number) => { window = [a, b]; return q; },
           single: async () => ({ data: desc ? rows[rows.length - 1] ?? null : rows[0] ?? null }),
           insert: async (r: Record<string, unknown>) => { insertRow = r; rows.push({ id: rows.length + 1, ...r } as unknown as ChainRow); return { error: null }; },
           then: (res: (v: unknown) => unknown) => {
+            if (head) return Promise.resolve({ data: null, count: rows.length, error: null }).then(res);   // the loader's row count
             let out = desc ? [...rows].reverse() : [...rows];
             if (window) out = out.slice(window[0], window[1] + 1);
             out = out.slice(0, Math.min(lim ?? Infinity, maxRows));

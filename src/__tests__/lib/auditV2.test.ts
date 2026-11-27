@@ -209,3 +209,98 @@ describe("writeAuditLog", () => {
     expect(s.inserts).toHaveLength(1);
   });
 });
+
+describe("one-child-per-parent migrations", () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("fs") as typeof import("fs");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require("path") as typeof import("path");
+  const sql = (f: string) => fs.readFileSync(path.join(__dirname, "../../../supabase/migrations", f), "utf8");
+
+  it("the new-entries index is partial, so an organisation's existing fork cannot block it", () => {
+    const s = sql("20261128_audit_one_child_new_entries.sql");
+    expect(s).toContain("CREATE UNIQUE INDEX audit_log_one_child_new_entries");
+    expect(s).toContain("(COALESCE(prev_hash, ''GENESIS''))");
+    expect(s).toContain("WHERE id > %s");
+    expect(s).toContain("MAX(id)");
+  });
+
+  it("the full-table index skips rather than fails when a fork exists (so it is never relied on alone)", () => {
+    expect(sql("20261128_audit_one_child_per_parent.sql")).toContain("EXCEPTION WHEN unique_violation");
+  });
+});
+
+describe("recording that forks were reviewed", () => {
+  /** A v2 chain: entries 1,2, then 3 which forks off entry 1. Optionally followed by a review entry. */
+  function forkedChain(review?: { ids: number[]; at?: "end" | "before" }): ChainRow[] {
+    const rows = chain(2);
+    const mk = (id: number, prev: string | null, event_type: string, payload: unknown): ChainRow => {
+      const created_at = new Date(T0 + id * 60_000).toISOString();
+      const f = { event_type, actor_id: "u", actor_email: "a@x.dev", resource_type: "audit_log", resource_id: null as string | null, payload };
+      return { id, org_id: ORG, ...f, prev_hash: prev, created_at, entry_hash: auditEntryHashV2({ ...f, prev_hash: prev, org_id: ORG, created_at }) };
+    };
+    rows.push(mk(3, rows[0].entry_hash, "user_login", { fork: true }));                       // shares entry 1 as its parent
+    if (review) rows.push(mk(4, rows[2].entry_hash, "audit_forks_reviewed", { fork_entry_ids: review.ids }));
+    return rows;
+  }
+
+  it("an unreviewed fork is not clean", () => {
+    expect(checkAuditChain(forkedChain())).toMatchObject({ status: "FORK_DETECTED", valid: false, fork_ids: [3], unreviewed_forks: 1 });
+  });
+
+  it("once an entry later in the chain names it, the fork counts as reviewed and the log verifies", () => {
+    expect(checkAuditChain(forkedChain({ ids: [3] }))).toMatchObject({ status: "VALID", valid: true, concurrent: 1, reviewed_forks: 1, unreviewed_forks: 0 });
+  });
+
+  it("a review does not cover a fork it did not name", () => {
+    expect(checkAuditChain(forkedChain({ ids: [99] }))).toMatchObject({ status: "FORK_DETECTED", unreviewed_fork_ids: [3] });
+    expect(checkAuditChain(forkedChain({ ids: [] }))).toMatchObject({ status: "FORK_DETECTED" });
+  });
+
+  it("a fork that happens AFTER the review is not covered by it", () => {
+    const rows = forkedChain({ ids: [3] });
+    // entry 5 forks off entry 3 (which already has entry 4 as a child)
+    const created_at = new Date(T0 + 5 * 60_000).toISOString();
+    const f = { event_type: "user_login", actor_id: "u", actor_email: "a@x.dev", resource_type: "session", resource_id: null as string | null, payload: { late: true } };
+    rows.push({ id: 5, org_id: ORG, ...f, prev_hash: rows[2].entry_hash, created_at, entry_hash: auditEntryHashV2({ ...f, prev_hash: rows[2].entry_hash, org_id: ORG, created_at }) });
+    expect(checkAuditChain(rows)).toMatchObject({ status: "FORK_DETECTED", reviewed_forks: 1, unreviewed_fork_ids: [5], fork_at: 5 });
+  });
+
+  it("a review entry cannot vouch for a fork that did not exist yet (it can only name entries before its own id)", () => {
+    // review entry 4 names fork 3 and ALSO 5; entry 5 (written after the review) forks off entry 3
+    const rows = forkedChain({ ids: [3, 5] });
+    const created_at = new Date(T0 + 5 * 60_000).toISOString();
+    const f = { event_type: "user_login", actor_id: "u", actor_email: "a@x.dev", resource_type: "session", resource_id: null as string | null, payload: { later: true } };
+    rows.push({ id: 5, org_id: ORG, ...f, prev_hash: rows[2].entry_hash, created_at, entry_hash: auditEntryHashV2({ ...f, prev_hash: rows[2].entry_hash, org_id: ORG, created_at }) });
+    expect(checkAuditChain(rows)).toMatchObject({ status: "FORK_DETECTED", reviewed_forks: 1, unreviewed_fork_ids: [5] });
+  });
+
+  it("changing a review entry's payload breaks its hash, so a review cannot be forged or edited", () => {
+    const rows = forkedChain({ ids: [3] });
+    rows[3].payload = { fork_entry_ids: [3, 7] };
+    expect(checkAuditChain(rows)).toMatchObject({ status: "INVALID", valid: false, broken_at: 4 });
+  });
+
+  it("a review never hides tampering: a changed entry is still INVALID", () => {
+    const rows = forkedChain({ ids: [3] });
+    rows[1].resource_id = "x";
+    expect(checkAuditChain(rows).valid).toBe(false);
+  });
+
+  it("checkpoint creation is allowed again after the review, and still refused without it", async () => {
+    const keys = generateSigningKeyPair();
+    const saved = process.env.ATTESTATION_SIGNING_KEY;
+    process.env.ATTESTATION_SIGNING_KEY = keys.privateKeyPem;
+    try {
+      const blocked = fakeSupabase({ audit_log: forkedChain().map(r => ({ ...r })), audit_checkpoints: [], signing_keys: [] });
+      expect(await createCheckpoint(blocked.client as never, ORG)).toMatchObject({ created: false, status: "CHAIN_FORKED" });
+      const ok = fakeSupabase({ audit_log: forkedChain({ ids: [3] }).map(r => ({ ...r })), audit_checkpoints: [], signing_keys: [] });
+      expect(await createCheckpoint(ok.client as never, ORG)).toMatchObject({ created: true });
+    } finally { if (saved === undefined) delete process.env.ATTESTATION_SIGNING_KEY; else process.env.ATTESTATION_SIGNING_KEY = saved; }
+  });
+
+  it("the offline bundle verifier agrees", () => {
+    expect(bundleVerifier.checkChain(forkedChain(), ORG)).toMatchObject({ valid: false, forked: true, fork_at: 3 });
+    expect(bundleVerifier.checkChain(forkedChain({ ids: [3] }), ORG)).toMatchObject({ valid: true });
+  });
+});

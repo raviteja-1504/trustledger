@@ -94,6 +94,16 @@ export default function AuditPage() {
     setLoadingMore(false);
   }
 
+  const [reviewing, setReviewing] = useState<"idle" | "busy" | "error">("idle");
+  async function recordReview() {
+    setReviewing("busy");
+    try {
+      await authedFetch("/api/audit/forks", { method: "POST", body: JSON.stringify({ note: "Reviewed from the Audit page" }) });
+      setReviewing("idle");
+      await runVerify();
+    } catch { setReviewing("error"); }
+  }
+
   async function runVerify() {
     setVerify({ state: "checking" });
     try { setVerify({ state: "done", result: await authedFetch<ChainVerification>("/api/audit", { method: "POST" }) }); }
@@ -176,14 +186,31 @@ export default function AuditPage() {
             </div>
             {verify.state === "error" && <p className="mt-3 text-xs text-rose-600">The check couldn&apos;t run. Please try again.</p>}
             {verify.state === "done" && v && (
-              <div role="status" className={`mt-3 rounded-xl px-4 py-3 text-xs ${v.valid ? "bg-emerald-50 text-emerald-800" : v.status === "FORK_DETECTED" ? "bg-amber-50 text-amber-900" : "bg-rose-50 text-rose-800"}`}>
+              <div role="status" className={`mt-3 rounded-xl px-4 py-3 text-xs ${v.valid ? "bg-emerald-50 text-emerald-800" : v.status === "FORK_DETECTED" || v.status === "INCOMPLETE" || v.status === "INCOMPLETE_LIMIT_REACHED" ? "bg-amber-50 text-amber-900" : "bg-rose-50 text-rose-800"}`}>
+                {v.status === "INCOMPLETE" ? (
+                  <p><strong>Not checked.</strong> The log could not be read in full, so nothing can be said about it either way. Please try again.</p>
+                ) : v.status === "INCOMPLETE_LIMIT_REACHED" ? (
+                  <p><strong>Only part of the log was checked.</strong> It is longer than a single check reads ({plural(v.total, "entry", "entries")} were checked), so it is not reported as verified.</p>
+                ) : v.status === "FORK_DETECTED" ? (
+                  <p><strong>Not a clean history.</strong> {plural(v.unreviewed_forks ?? v.concurrent, "entry", "entries")} share{(v.unreviewed_forks ?? v.concurrent) === 1 ? "s" : ""} a previous entry with an earlier one (from entry #{v.fork_at}), so the log has two branches. Every entry may still match its hash, but the order is ambiguous and nothing new will be signed over it until this is investigated.</p>
+                ) : null}
                 {v.status === "FORK_DETECTED" ? (
-                  <p><strong>Not a clean history.</strong> {plural(v.concurrent, "entry", "entries")} share{v.concurrent === 1 ? "s" : ""} a previous entry with an earlier one (from entry #{v.fork_at}), so the log has two branches. Every entry may still match its hash, but the order is ambiguous and nothing new will be signed over it until this is investigated.</p>
-                ) : v.valid ? (
+                  <div className="mt-2">
+                    <p className="text-gray-700">After you have looked at them (for example, two sign-ins recorded within a second of each other), an admin can record that they were reviewed. That is written into the log itself, and does not change any entry.</p>
+                    <button onClick={recordReview} disabled={reviewing === "busy"} className="mt-2 px-3 py-1.5 text-[11px] font-bold text-amber-900 bg-amber-100 rounded-lg hover:bg-amber-200 disabled:opacity-50">
+                      {reviewing === "busy" ? "Recording…" : "Record that these were reviewed"}
+                    </button>
+                    {reviewing === "error" && <p className="mt-1 text-rose-600">Couldn&apos;t record the review (admins only). Please try again.</p>}
+                  </div>
+                ) : null}
+                {v.status === "FORK_DETECTED" || v.status === "INCOMPLETE" || v.status === "INCOMPLETE_LIMIT_REACHED" ? null : v.valid ? (
                   <p><strong>Intact.</strong> {plural(v.total, "entry", "entries")}{v.first_at ? ` from ${fmtDay(v.first_at)} to ${fmtDay(v.last_at!)}` : ""}: every link is in place
                     {v.verified ? `, and ${plural(v.verified, "entry's", "entries'")} contents match their hashes` : ""}.</p>
                 ) : (
                   <p><strong>Problem at entry #{v.broken_at}.</strong> {v.reason === "missing_link" ? "It doesn't link to any earlier entry — an entry before it may have been removed." : "Its contents no longer match its hash — it may have been changed."}</p>
+                )}
+                {v.status === "VALID" && !!v.reviewed_forks && (
+                  <p className="mt-1 text-gray-600">{plural(v.reviewed_forks, "entry shares", "entries share")} a previous entry with an earlier one (written at the same moment); an admin recorded that {v.reviewed_forks === 1 ? "it was" : "they were"} reviewed.</p>
                 )}
                 {v.legacy > 0 && <p className="mt-1 text-gray-600">{plural(v.legacy, "older entry", "older entries")} (written before contents were stored in a checkable form) can only be link-checked.</p>}
               </div>

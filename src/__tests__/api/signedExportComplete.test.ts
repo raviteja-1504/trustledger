@@ -296,6 +296,23 @@ describe("hash v2 entries (org, actor and resource covered), verified offline", 
     expect(r.out.rows).toMatchObject({ checked: 8, verified: 8, metadata_verified: 8 });
   });
 
+  it("a fork recorded as reviewed (an audit_forks_reviewed entry in the chain) is exported as VERIFIED with a note, and the offline script accepts it", async () => {
+    const k = withKey();
+    const rows = chainV2(6, true);                                   // entry 6 forks off entry 1
+    const created_at = new Date(T0 + 7 * 1000).toISOString();
+    const f = { event_type: "audit_forks_reviewed", actor_id: "user-admin", actor_email: "admin@acme.dev", resource_type: "audit_log", resource_id: null as unknown as string, payload: { fork_entry_ids: [6], count: 1 } };
+    const entry_hash = auditEntryHashV2({ ...f, prev_hash: rows[5].entry_hash, org_id: "org-1", created_at });
+    rows.push({ id: 7, org_id: "org-1", ...f, prev_hash: rows[5].entry_hash, entry_hash, created_at });
+    seed(rows);
+    const res = await fetchExport("csv");
+    expect(res.headers.get("X-TrustLedger-Chain-Valid")).toBe("true");
+    const csv = await res.text();
+    expect(csv).toContain("# Chain integrity: VERIFIED (1 fork in the history, recorded as reviewed)");
+    const r = run(save("reviewed.csv", csv), k.keyFile);
+    expect(r.code).toBe(0);
+    expect(r.out.rows).toMatchObject({ checked: 7, reviewed_forks: 1 });
+  });
+
   it("a forked chain is exported as NOT CLEAN, never as VERIFIED, and the offline script fails it", async () => {
     const k = withKey(); seed(chainV2(6, true));
     const res = await fetchExport("csv");

@@ -50,7 +50,8 @@ export type AuditEventType =
   | "data_exported"
   | "evidence_uploaded" | "evidence_deleted"
   | "ai_tool_policy_changed" | "shadow_ai_triaged"
-  | "org_deletion_requested" | "org_deleted";
+  | "org_deletion_requested" | "org_deleted"
+  | "audit_forks_reviewed";
 
 interface AuditEntry {
   org_id:        string;
@@ -172,10 +173,12 @@ export interface ChainRow {
  *                    was deleted or the chain was truncated.
  * - INVALID:         an entry's contents no longer hash to their stored entry_hash — the row was
  *                    modified in place.
- * - INCOMPLETE:      verification could not run (e.g. a database error was thrown before all
- *                    rows were loaded).
+ * - INCOMPLETE:      verification could not run (a database error before all rows were loaded, or the
+ *                    database returned fewer rows than it holds). Says nothing either way about the log.
+ * - INCOMPLETE_LIMIT_REACHED: the log is longer than the number of entries this check reads (MAX_AUDIT_ROWS), so
+ *                    only a prefix was seen. A clean prefix is not a clean log: nothing is reported as verified.
  */
-export type VerificationStatus = "VALID" | "FORK_DETECTED" | "MISSING_RECORDS" | "INVALID" | "INCOMPLETE";
+export type VerificationStatus = "VALID" | "FORK_DETECTED" | "MISSING_RECORDS" | "INVALID" | "INCOMPLETE" | "INCOMPLETE_LIMIT_REACHED";
 
 export interface ChainVerification {
   /** Explicit status (see VerificationStatus). Use this instead of `valid` where possible. */
@@ -191,8 +194,15 @@ export interface ChainVerification {
   legacy: number;
   /** Entries where two (or more) entries share the same prev_hash. FORK_DETECTED is set when this is > 0. */
   concurrent: number;
-  /** id of the first entry that shares its parent with an earlier one (set with FORK_DETECTED). */
+  /** id of the first UNREVIEWED entry that shares its parent with an earlier one (set with FORK_DETECTED). */
   fork_at?: number;
+  /** Every entry that shares a parent with an earlier one, how many of them an admin has recorded as reviewed (an
+   *  "audit_forks_reviewed" entry later in the chain names them), and how many are still unreviewed. A fork is a fact of
+   *  the history and stays in the chain; reviewing it records, inside the chain itself, that someone looked. */
+  fork_ids?: number[];
+  reviewed_forks?: number;
+  unreviewed_forks?: number;
+  unreviewed_fork_ids?: number[];
   /** id of the first entry that fails: its link points nowhere, or its recomputable contents changed. */
   broken_at?: number;
   reason?: "missing_link" | "content_changed" | "downgraded";
@@ -209,7 +219,10 @@ export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
   const seenHashes = new Set<string>();
   const linkedFrom = new Set<string>();
   let recomputable = false, seenV2 = false;
-  let verified = 0, metadata = 0, legacy = 0, concurrent = 0, forkAt: number | undefined;
+  let verified = 0, metadata = 0, legacy = 0, concurrent = 0;
+  const forkIds: number[] = [];
+  const forkIdSet = new Set<number>();
+  const reviewed = new Set<number>();
   const so_far = () => ({ ...base, verified, metadata_verified: metadata, legacy, concurrent });
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -218,7 +231,7 @@ export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
       if (r.prev_hash == null || !seenHashes.has(r.prev_hash)) {
         return { ...so_far(), status: "MISSING_RECORDS", valid: false, broken_at: r.id, reason: "missing_link" };
       }
-      if (linkedFrom.has(r.prev_hash)) { concurrent++; forkAt ??= r.id; }
+      if (linkedFrom.has(r.prev_hash)) { concurrent++; forkIds.push(r.id); forkIdSet.add(r.id); }
       linkedFrom.add(r.prev_hash);
     }
     // Contents: recompute from the stored row -- v2 (covers org / actor / resource too) first, then v1.
@@ -236,20 +249,42 @@ export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
     }
     else if (!recomputable) legacy++;
     else return { ...so_far(), status: "INVALID", valid: false, broken_at: r.id, reason: "content_changed" };
+    // A review entry covers the forks it names that came BEFORE it (it cannot vouch for entries that did not exist yet).
+    if (r.event_type === "audit_forks_reviewed") {
+      const named = (r.payload as { fork_entry_ids?: unknown } | null)?.fork_entry_ids;
+      if (Array.isArray(named)) for (const id of named) if (typeof id === "number" && id < r.id && forkIdSet.has(id)) reviewed.add(id);
+    }
     seenHashes.add(r.entry_hash);
   }
-  const status: VerificationStatus = concurrent > 0 ? "FORK_DETECTED" : "VALID";
-  return { ...so_far(), status, valid: status === "VALID", ...(forkAt !== undefined ? { fork_at: forkAt } : {}) };
+  const unreviewed = forkIds.filter(id => !reviewed.has(id));
+  const status: VerificationStatus = unreviewed.length > 0 ? "FORK_DETECTED" : "VALID";
+  return {
+    ...so_far(), status, valid: status === "VALID",
+    ...(forkIds.length > 0 ? { fork_ids: forkIds, reviewed_forks: forkIds.length - unreviewed.length, unreviewed_forks: unreviewed.length, unreviewed_fork_ids: unreviewed } : {}),
+    ...(unreviewed.length > 0 ? { fork_at: unreviewed[0] } : {}),
+  };
 }
 
 const PAGE = 1000;
-const MAX_ROWS = 200_000;
+/** The most entries one verification reads. A longer log is reported as INCOMPLETE_LIMIT_REACHED, never as verified. */
+export const MAX_AUDIT_ROWS = 200_000;
 
-/** Every audit entry of an org in id order, paged past the 1000-row cap. `complete` is false when a read failed part-way. */
-export async function loadAuditRows(db: SupabaseClient<Database>, org_id: string): Promise<{ rows: ChainRow[]; complete: boolean }> {
+export type AuditLoadIncomplete = "read_failed" | "limit_reached" | "count_mismatch";
+
+/**
+ * Every audit entry of an org in id order, paged past the 1000-row cap. `complete` is true only when what was read is the
+ * WHOLE log: false (with the reason) when a read failed part-way, when the log is longer than `maxRows`, or when the
+ * database holds a different number of entries than came back (a server that shortens pages makes a short page look like
+ * the last one, and silently drops the rest).
+ */
+export async function loadAuditRows(
+  db: SupabaseClient<Database>, org_id: string, opts: { maxRows?: number } = {},
+): Promise<{ rows: ChainRow[]; complete: boolean; reason?: AuditLoadIncomplete }> {
+  const maxRows = opts.maxRows ?? MAX_AUDIT_ROWS;
   const rows: ChainRow[] = [];
+  let ranToLimit = true;
   try {
-    for (let from = 0; from < MAX_ROWS; from += PAGE) {
+    for (let from = 0; from < maxRows; from += PAGE) {
       const { data, error } = await db
         .from("audit_log")
         .select("id, event_type, actor_id, actor_email, resource_type, resource_id, payload, prev_hash, entry_hash, created_at")
@@ -258,10 +293,15 @@ export async function loadAuditRows(db: SupabaseClient<Database>, org_id: string
         .range(from, from + PAGE - 1) as { data: ChainRow[] | null; error: unknown };
       if (error) throw error;
       rows.push(...(data ?? []).map(r => ({ ...r, org_id })));
-      if (!data || data.length < PAGE) break;
+      if (!data || data.length < PAGE) { ranToLimit = false; break; }
     }
+    // The loop ended on its limit, or on a page that merely looked short: ask the database how many entries there are.
+    const { count, error: countError } = await db.from("audit_log").select("id", { count: "exact", head: true }).eq("org_id", org_id);
+    if (countError || count == null) return { rows, complete: false, reason: "read_failed" };
+    if (count > rows.length) return { rows, complete: false, reason: ranToLimit ? "limit_reached" : "count_mismatch" };
+    if (count < rows.length) return { rows, complete: false, reason: "count_mismatch" };
   } catch {
-    return { rows, complete: false };
+    return { rows, complete: false, reason: "read_failed" };
   }
   return { rows, complete: true };
 }
@@ -271,10 +311,10 @@ export async function verifyAuditChain(
   db: SupabaseClient<Database>,
   org_id: string,
 ): Promise<ChainVerification> {
-  const { rows, complete } = await loadAuditRows(db, org_id);
+  const { rows, complete, reason } = await loadAuditRows(db, org_id);
   if (!complete) {
     return {
-      status: "INCOMPLETE",
+      status: reason === "limit_reached" ? "INCOMPLETE_LIMIT_REACHED" : "INCOMPLETE",
       valid: false,
       total: rows.length,
       verified: 0,

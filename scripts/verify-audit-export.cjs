@@ -97,15 +97,15 @@ function checkSignature(signed, sig, trustedPem, hmacKey, problems, out) {
 
 /** Entry hashes recompute and entries link. `rows` = [{id,event_type,actor_email,payload,prev_hash,entry_hash,created_at}]. */
 function checkRows(rows, problems, out, orgId) {
-  const seen = new Set(), parents = new Set(); let recomputable = false, seenV2 = false, legacy = 0, verified = 0, metadata = 0, forkAt = null;
-  out.rows = { checked: rows.length, verified: 0, metadata_verified: 0, legacy: 0, broken_at: null, fork_at: null };
+  const seen = new Set(), parents = new Set(); let recomputable = false, seenV2 = false, legacy = 0, verified = 0, metadata = 0; const forkIds = [], forkSet = new Set(), reviewedSet = new Set();
+  out.rows = { checked: rows.length, verified: 0, metadata_verified: 0, legacy: 0, broken_at: null, fork_at: null, reviewed_forks: 0 };
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (i > 0 && (r.prev_hash == null || !seen.has(r.prev_hash))) {
       problems.push(`entry ${r.id} does not link to an earlier entry in this export: an entry may have been removed`);
       out.rows.broken_at = r.id; break;
     }
-    if (r.prev_hash != null) { if (parents.has(r.prev_hash) && forkAt == null) forkAt = r.id; parents.add(r.prev_hash); }
+    if (r.prev_hash != null) { if (parents.has(r.prev_hash)) { forkIds.push(r.id); forkSet.add(r.id); } parents.add(r.prev_hash); }
     const at = Number.isNaN(Date.parse(r.created_at)) ? r.created_at : new Date(r.created_at).toISOString();
     if (orgId != null && entryHashV2(r, orgId, at) === r.entry_hash) { recomputable = true; seenV2 = true; verified++; metadata++; }
     else if (entryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) {
@@ -114,10 +114,16 @@ function checkRows(rows, problems, out, orgId) {
     }
     else if (!recomputable) legacy++;
     else { problems.push(`entry ${r.id}: its contents no longer match its hash`); out.rows.broken_at = r.id; break; }
+    // An "audit_forks_reviewed" entry covers the forks it names that came BEFORE it.
+    if (r.event_type === "audit_forks_reviewed" && r.payload && Array.isArray(r.payload.fork_entry_ids)) {
+      for (const id of r.payload.fork_entry_ids) if (typeof id === "number" && id < r.id && forkSet.has(id)) reviewedSet.add(id);
+    }
     seen.add(r.entry_hash);
   }
+  const unreviewed = forkIds.filter(id => !reviewedSet.has(id)), forkAt = unreviewed.length ? unreviewed[0] : null;
+  out.rows.reviewed_forks = forkIds.length - unreviewed.length;
   out.rows.verified = verified; out.rows.legacy = legacy; out.rows.metadata_verified = metadata; out.rows.fork_at = forkAt;
-  if (forkAt != null) problems.push(`the history has a fork: entry ${forkAt} shares its previous entry with an earlier one, so this is not a clean history`);
+  if (forkAt != null) problems.push(`the history has ${unreviewed.length} unreviewed fork entr${unreviewed.length === 1 ? "y" : "ies"}: entry ${forkAt} shares its previous entry with an earlier one, so this is not a clean history`);
 }
 
 function verifyJson(text, trustedPem, hmacKey) {

@@ -39,14 +39,14 @@ const entryHashV2 = (r, orgId, iso) => sha256("tl-audit-v2:" + canonicalJson([
 ]));
 
 function checkChain(rows, orgId) {
-  const seen = new Set(), parents = new Set();
-  let recomputable = false, seenV2 = false, forkAt = null;
+  const seen = new Set(), parents = new Set(), forkIds = [], forkSet = new Set(), reviewedSet = new Set();
+  let recomputable = false, seenV2 = false;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (i > 0 || r.prev_hash != null) {
       if (r.prev_hash == null || !seen.has(r.prev_hash)) return { valid: false, broken_at: r.id, reason: "missing_link" };
     }
-    if (r.prev_hash != null) { if (parents.has(r.prev_hash) && forkAt == null) forkAt = r.id; parents.add(r.prev_hash); }
+    if (r.prev_hash != null) { if (parents.has(r.prev_hash)) { forkIds.push(r.id); forkSet.add(r.id); } parents.add(r.prev_hash); }
     const at = Number.isNaN(Date.parse(r.created_at)) ? r.created_at : new Date(r.created_at).toISOString();
     if (orgId != null && entryHashV2(r, orgId, at) === r.entry_hash) { recomputable = true; seenV2 = true; }
     else if (entryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) {
@@ -54,9 +54,14 @@ function checkChain(rows, orgId) {
       recomputable = true;
     }
     else if (recomputable) return { valid: false, broken_at: r.id, reason: "content_changed" };
+    // An "audit_forks_reviewed" entry covers the forks it names that came BEFORE it.
+    if (r.event_type === "audit_forks_reviewed" && r.payload && Array.isArray(r.payload.fork_entry_ids)) {
+      for (const id of r.payload.fork_entry_ids) if (typeof id === "number" && id < r.id && forkSet.has(id)) reviewedSet.add(id);
+    }
     seen.add(r.entry_hash);
   }
-  return forkAt == null ? { valid: true } : { valid: false, forked: true, fork_at: forkAt };
+  const unreviewed = forkIds.filter(id => !reviewedSet.has(id));
+  return unreviewed.length === 0 ? { valid: true, reviewed_forks: forkIds.length } : { valid: false, forked: true, fork_at: unreviewed[0], unreviewed_forks: unreviewed.length };
 }
 
 function signatureOk(cp, pem) {

@@ -23,7 +23,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
-import { verifyAuditChain, writeAuditLog, canonicalJson } from "@/lib/audit";
+import { verifyAuditChain, writeAuditLog, canonicalJson, MAX_AUDIT_ROWS } from "@/lib/audit";
 import { signEd25519, type Ed25519Signature } from "@/lib/exportSigning";
 import { allRows } from "@/lib/allRows";
 import { csvLine } from "@/lib/csv";
@@ -133,7 +133,7 @@ export async function GET(req: NextRequest) {
       `# Period: ${start} — ${end}`,
       `# Generated: ${exportedAt}`,
       `# Events: ${eventList.length}`,
-      `# Chain integrity: ${chainResult.status === "VALID" ? "VERIFIED" : chainResult.status === "FORK_DETECTED" ? `NOT CLEAN (forked: ${chainResult.concurrent} entr${chainResult.concurrent === 1 ? "y shares" : "ies share"} a parent with an earlier one)` : "BROKEN (tampered)"}`,
+      `# Chain integrity: ${chainResult.status === "VALID" ? (chainResult.reviewed_forks ? `VERIFIED (${chainResult.reviewed_forks} fork${chainResult.reviewed_forks === 1 ? "" : "s"} in the history, recorded as reviewed)` : "VERIFIED") : chainResult.status === "INCOMPLETE_LIMIT_REACHED" ? `NOT VERIFIED (the log is longer than ${MAX_AUDIT_ROWS} entries; verification covers only part of it)` : chainResult.status === "FORK_DETECTED" ? `NOT CLEAN (forked: ${chainResult.unreviewed_forks ?? chainResult.concurrent} unreviewed entr${(chainResult.unreviewed_forks ?? chainResult.concurrent) === 1 ? "y shares" : "ies share"} a parent with an earlier one)` : "BROKEN (tampered)"}`,
       "",
       csvLine(CSV_HEADER),
       ...rows,
