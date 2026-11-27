@@ -94,6 +94,7 @@ export type CheckpointStatus =
   | "NO_CHECKPOINTS"     // nothing to compare against: the chain's own links are all that was checked
   | "TRUNCATED"          // fewer entries remain than a checkpoint recorded
   | "HISTORY_MODIFIED"   // a committed entry changed, or the chain itself no longer verifies
+  | "CHAIN_FORKED"       // two entries share one parent: not a clean history, so nothing more is signed over it
   | "CHECKPOINT_INVALID" // bad signature or hash, a gap or reorder in the checkpoint sequence, or the wrong org
   | "KEY_UNTRUSTED";     // signed by a revoked key, or by a key that is not available to verify with
 
@@ -117,8 +118,10 @@ export function verifyCheckpointedChain(
   const problems: CheckpointProblem[] = [];
   const keyById = new Map(keys.map(k => [k.id, k]));
   const sorted = [...checkpoints].sort((a, b) => a.payload.sequence - b.payload.sequence);
-  const flags = { invalid: false, untrusted: false, truncated: false, modified: !chain.valid };
-  if (!chain.valid) problems.push({ sequence: null, code: "chain_" + (chain.reason ?? "invalid"), detail: `audit chain failed at entry ${chain.broken_at ?? "?"}` });
+  const forked = chain.status === "FORK_DETECTED";
+  const flags = { invalid: false, untrusted: false, truncated: false, modified: !chain.valid && !forked, forked };
+  if (forked) problems.push({ sequence: null, code: "chain_forked", detail: `${chain.concurrent} audit entr${chain.concurrent === 1 ? "y shares" : "ies share"} a parent with an earlier one, from entry ${chain.fork_at ?? "?"}` });
+  else if (!chain.valid) problems.push({ sequence: null, code: "chain_" + (chain.reason ?? "invalid"), detail: `audit chain failed at entry ${chain.broken_at ?? "?"}` });
 
   let prev: SignedCheckpoint | null = null;
   for (const cp of sorted) {
@@ -153,6 +156,7 @@ export function verifyCheckpointedChain(
     flags.invalid ? "CHECKPOINT_INVALID"
     : flags.truncated ? "TRUNCATED"
     : flags.modified ? "HISTORY_MODIFIED"
+    : flags.forked ? "CHAIN_FORKED"
     : flags.untrusted ? "KEY_UNTRUSTED"
     : sorted.length === 0 ? "NO_CHECKPOINTS" : "VALID";
   const latest = sorted[sorted.length - 1]?.payload ?? null;

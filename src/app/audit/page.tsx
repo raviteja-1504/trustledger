@@ -176,15 +176,16 @@ export default function AuditPage() {
             </div>
             {verify.state === "error" && <p className="mt-3 text-xs text-rose-600">The check couldn&apos;t run. Please try again.</p>}
             {verify.state === "done" && v && (
-              <div role="status" className={`mt-3 rounded-xl px-4 py-3 text-xs ${v.valid ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>
-                {v.valid ? (
+              <div role="status" className={`mt-3 rounded-xl px-4 py-3 text-xs ${v.valid ? "bg-emerald-50 text-emerald-800" : v.status === "FORK_DETECTED" ? "bg-amber-50 text-amber-900" : "bg-rose-50 text-rose-800"}`}>
+                {v.status === "FORK_DETECTED" ? (
+                  <p><strong>Not a clean history.</strong> {plural(v.concurrent, "entry", "entries")} share{v.concurrent === 1 ? "s" : ""} a previous entry with an earlier one (from entry #{v.fork_at}), so the log has two branches. Every entry may still match its hash, but the order is ambiguous and nothing new will be signed over it until this is investigated.</p>
+                ) : v.valid ? (
                   <p><strong>Intact.</strong> {plural(v.total, "entry", "entries")}{v.first_at ? ` from ${fmtDay(v.first_at)} to ${fmtDay(v.last_at!)}` : ""}: every link is in place
                     {v.verified ? `, and ${plural(v.verified, "entry's", "entries'")} contents match their hashes` : ""}.</p>
                 ) : (
                   <p><strong>Problem at entry #{v.broken_at}.</strong> {v.reason === "missing_link" ? "It doesn't link to any earlier entry — an entry before it may have been removed." : "Its contents no longer match its hash — it may have been changed."}</p>
                 )}
                 {v.legacy > 0 && <p className="mt-1 text-gray-600">{plural(v.legacy, "older entry", "older entries")} (written before contents were stored in a checkable form) can only be link-checked.</p>}
-                {v.concurrent > 0 && <p className="mt-1 text-gray-600">{plural(v.concurrent, "entry", "entries")} were written at the same moment as another and share its link — expected, not tampering.</p>}
               </div>
             )}
           </section>

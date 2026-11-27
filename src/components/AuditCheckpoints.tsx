@@ -21,6 +21,7 @@ const STATUS: Record<CheckpointStatus, { tone: "ok" | "warn" | "bad" | "idle"; t
   NO_CHECKPOINTS: { tone: "idle", title: "No checkpoints yet", body: () => "There is nothing signed to compare the log against. Record a checkpoint to start." },
   TRUNCATED: { tone: "bad", title: "Entries are missing", body: () => "The log holds fewer entries than a signed checkpoint recorded. Recent entries may have been deleted." },
   HISTORY_MODIFIED: { tone: "bad", title: "History has changed", body: () => "An entry a checkpoint committed to no longer matches, or the log's own chain no longer verifies." },
+  CHAIN_FORKED: { tone: "bad", title: "The log has forked", body: () => "Two entries share the same previous entry, so the history has two branches. It is not a clean history, and no new checkpoint will be signed over it until this is investigated." },
   CHECKPOINT_INVALID: { tone: "bad", title: "A checkpoint does not verify", body: () => "A signature, link or sequence number is wrong, or a checkpoint is missing from the middle." },
   KEY_UNTRUSTED: { tone: "warn", title: "Signed by an untrusted key", body: () => "A checkpoint was signed with a revoked key, or the key is not available to verify it." },
 };

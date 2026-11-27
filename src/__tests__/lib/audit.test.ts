@@ -80,7 +80,7 @@ describe("checkAuditChain", () => {
     const c = { ...b, id: 3, event_type: "y" };
     c.entry_hash = auditEntryHash(c.prev_hash, c.event_type, null, c.payload, c.created_at);
     const r = checkAuditChain([a, b, c]);
-    expect(r).toMatchObject({ status: "FORK_DETECTED", valid: true, concurrent: 1, verified: 3 });
+    expect(r).toMatchObject({ status: "FORK_DETECTED", valid: false, concurrent: 1, verified: 3 });
   });
 
   it("a first entry pointing at a hash that isn't there is a missing link", () => {

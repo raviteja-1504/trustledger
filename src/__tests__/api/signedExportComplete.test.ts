@@ -15,7 +15,7 @@ import { join } from "path";
 import { NextRequest } from "next/server";
 import { fakeSupabase } from "../helpers/fakeSupabase";
 import { _resetExportKeyCache, keyIdFromPem } from "@/lib/exportSigning";
-import { auditEntryHash } from "@/lib/audit";
+import { auditEntryHash, auditEntryHashV2 } from "@/lib/audit";
 import { parseCsv } from "@/lib/csv";
 
 let db: ReturnType<typeof fakeSupabase>;
@@ -157,9 +157,9 @@ describe("CSV export signs its own bytes", () => {
     withKey(); seed(chain(6));
     const csv = await (await fetchExport("csv")).text();
     const { body, footer } = splitCsv(csv);
-    expect(body).toContain("# Format: trustledger-audit-csv/1");
+    expect(body).toContain("# Format: trustledger-audit-csv/2");
     expect(body).toContain("# Events: 6");
-    expect(body).toContain("id,event_type,actor_email,resource_type,resource_id,payload,prev_hash,entry_hash,created_at");
+    expect(body).toContain("id,event_type,actor_email,resource_type,resource_id,payload,prev_hash,entry_hash,created_at,actor_id");
     expect(footer).toMatch(/^# --- signature ---\n# Signature \(Ed25519\): [A-Za-z0-9+/=]+\n/);
     expect(footer).toContain("# Public key (SPKI, base64): ");
     expect(footer).toContain("# Public key id: ");
@@ -259,5 +259,52 @@ describe("CSV export signs its own bytes", () => {
   it("exits 2 with a message for a file that is not an audit export", () => {
     expect(run(save("junk.csv", "a,b\n1,2\n")).code).toBe(2);
     expect(run(save("junk.json", "{}")).code).toBe(2);
+  });
+});
+
+describe("hash v2 entries (org, actor and resource covered), verified offline", () => {
+  /** Like chain(), but every entry is v2-hashed and carries its actor_id. */
+  function chainV2(n: number, fork = false): Array<Ev & { actor_id: string }> {
+    const rows: Array<Ev & { actor_id: string }> = [];
+    let prev: string | null = null;
+    for (let i = 0; i < n; i++) {
+      const created_at = new Date(T0 + i * 1000).toISOString();
+      const f = { event_type: "member_role_changed", actor_id: `user-${i}`, actor_email: `ana${i}@acme.dev`, resource_type: "member", resource_id: `m${i}`, payload: { n: i } };
+      const parent: string | null = fork && i === n - 1 ? rows[0].entry_hash : prev;   // the last entry claims the FIRST as its parent
+      const entry_hash: string = auditEntryHashV2({ ...f, prev_hash: parent, org_id: "org-1", created_at });
+      rows.push({ id: i + 1, org_id: "org-1", ...f, prev_hash: parent, entry_hash, created_at });
+      prev = entry_hash;
+    }
+    return rows;
+  }
+
+  it("the CSV carries actor_id and the offline script verifies every entry with its metadata", async () => {
+    const k = withKey(); seed(chainV2(12));
+    const csv = await (await fetchExport("csv")).text();
+    expect(csv).toContain("# Format: trustledger-audit-csv/2");
+    expect(csv).toContain("# Chain integrity: VERIFIED");
+    expect(csv).toContain(",actor_id\n");
+    const r = run(save("v2.csv", csv), k.keyFile);
+    expect(r.code).toBe(0);
+    expect(r.out.rows).toMatchObject({ checked: 12, verified: 12, metadata_verified: 12, legacy: 0, broken_at: null });
+  });
+
+  it("the JSON export verifies offline too", async () => {
+    const k = withKey(); seed(chainV2(8));
+    const r = run(save("v2.json", await (await fetchExport("json")).text()), k.keyFile);
+    expect(r.code).toBe(0);
+    expect(r.out.rows).toMatchObject({ checked: 8, verified: 8, metadata_verified: 8 });
+  });
+
+  it("a forked chain is exported as NOT CLEAN, never as VERIFIED, and the offline script fails it", async () => {
+    const k = withKey(); seed(chainV2(6, true));
+    const res = await fetchExport("csv");
+    expect(res.headers.get("X-TrustLedger-Chain-Valid")).toBe("false");
+    const csv = await res.text();
+    expect(csv).toContain("# Chain integrity: NOT CLEAN (forked");
+    expect(csv).not.toContain("# Chain integrity: VERIFIED");
+    const r = run(save("fork.csv", csv), k.keyFile);
+    expect(r.code).not.toBe(0);
+    expect(r.out.problems.join(" ")).toMatch(/fork/);
   });
 });

@@ -26,7 +26,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 
 const MARKER = "# --- signature ---";
-const CSV_HEADER = ["id", "event_type", "actor_email", "resource_type", "resource_id", "payload", "prev_hash", "entry_hash", "created_at"];
+const CSV_HEADER_V1 = ["id", "event_type", "actor_email", "resource_type", "resource_id", "payload", "prev_hash", "entry_hash", "created_at"];
+const CSV_HEADER = [...CSV_HEADER_V1, "actor_id"];   // trustledger-audit-csv/2 adds actor_id (covered by hash v2)
 
 function canonicalJson(v) {
   if (v === null || typeof v !== "object") return JSON.stringify(v) === undefined ? "null" : JSON.stringify(v);
@@ -36,6 +37,13 @@ function canonicalJson(v) {
 const sha256 = s => crypto.createHash("sha256").update(s).digest("hex");
 const entryHash = (prev, type, actor, payload, iso) =>
   sha256(`${prev == null ? "GENESIS" : prev}::${type}::${actor == null ? "system" : actor}::${canonicalJson(payload == null ? {} : payload)}::${iso}`);
+// Hash v2 (src/lib/audit.ts auditEntryHashV2): also covers org_id, actor_id, resource_type and resource_id. A "" resource
+// (how a CSV writes null) is null.
+const nul = v => (v == null || v === "" ? null : v);
+const entryHashV2 = (r, orgId, iso) => sha256("tl-audit-v2:" + canonicalJson([
+  nul(r.prev_hash), orgId, r.event_type, nul(r.actor_id), r.actor_email == null ? "system" : r.actor_email,
+  nul(r.resource_type), nul(r.resource_id), r.payload == null ? {} : r.payload, iso,
+]));
 const keyIdOfPem = pem => sha256(crypto.createPublicKey(pem).export({ type: "spki", format: "der" })).slice(0, 16);
 const pemFromSpkiBase64 = b64 => "-----BEGIN PUBLIC KEY-----\n" + (b64.match(/.{1,64}/g) || []).join("\n") + "\n-----END PUBLIC KEY-----\n";
 
@@ -88,22 +96,28 @@ function checkSignature(signed, sig, trustedPem, hmacKey, problems, out) {
 }
 
 /** Entry hashes recompute and entries link. `rows` = [{id,event_type,actor_email,payload,prev_hash,entry_hash,created_at}]. */
-function checkRows(rows, problems, out) {
-  const seen = new Set(); let recomputable = false, legacy = 0, verified = 0;
-  out.rows = { checked: rows.length, verified: 0, legacy: 0, broken_at: null };
+function checkRows(rows, problems, out, orgId) {
+  const seen = new Set(), parents = new Set(); let recomputable = false, seenV2 = false, legacy = 0, verified = 0, metadata = 0, forkAt = null;
+  out.rows = { checked: rows.length, verified: 0, metadata_verified: 0, legacy: 0, broken_at: null, fork_at: null };
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (i > 0 && (r.prev_hash == null || !seen.has(r.prev_hash))) {
       problems.push(`entry ${r.id} does not link to an earlier entry in this export: an entry may have been removed`);
       out.rows.broken_at = r.id; break;
     }
+    if (r.prev_hash != null) { if (parents.has(r.prev_hash) && forkAt == null) forkAt = r.id; parents.add(r.prev_hash); }
     const at = Number.isNaN(Date.parse(r.created_at)) ? r.created_at : new Date(r.created_at).toISOString();
-    if (entryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) { recomputable = true; verified++; }
+    if (orgId != null && entryHashV2(r, orgId, at) === r.entry_hash) { recomputable = true; seenV2 = true; verified++; metadata++; }
+    else if (entryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) {
+      if (seenV2) { problems.push(`entry ${r.id} is in the old hash format after entries in the new one: it may have been re-hashed to hide a change`); out.rows.broken_at = r.id; break; }
+      recomputable = true; verified++;
+    }
     else if (!recomputable) legacy++;
     else { problems.push(`entry ${r.id}: its contents no longer match its hash`); out.rows.broken_at = r.id; break; }
     seen.add(r.entry_hash);
   }
-  out.rows.verified = verified; out.rows.legacy = legacy;
+  out.rows.verified = verified; out.rows.legacy = legacy; out.rows.metadata_verified = metadata; out.rows.fork_at = forkAt;
+  if (forkAt != null) problems.push(`the history has a fork: entry ${forkAt} shares its previous entry with an earlier one, so this is not a clean history`);
 }
 
 function verifyJson(text, trustedPem, hmacKey) {
@@ -116,7 +130,7 @@ function verifyJson(text, trustedPem, hmacKey) {
   if (declared !== doc.events.length) problems.push(`the export declares ${declared} events but contains ${doc.events.length}`);
   const signed = JSON.stringify({ org_id: m.org_id, period_start: m.period_start, period_end: m.period_end, exported_at: m.exported_at, event_count: declared, chain_valid: i.chain_valid, events: doc.events });
   checkSignature(signed, { algo: i.signature_algo, value: i.signature, pem: i.public_key_pem, keyId: i.key_id }, trustedPem, hmacKey, problems, out);
-  checkRows(doc.events.map(e => ({ ...e, payload: e.payload })), problems, out);
+  checkRows(doc.events.map(e => ({ ...e, payload: e.payload })), problems, out, m.org_id);
   out.chain_valid_claimed = i.chain_valid;
   return out;
 }
@@ -153,20 +167,23 @@ function verifyCsv(text, trustedPem, hmacKey) {
   const lines = signed.split("\n");
   const declaredLine = lines.find(l => l.startsWith("# Events: "));
   const declared = declaredLine ? Number(declaredLine.slice("# Events: ".length)) : NaN;
-  const dataStart = signed.indexOf(CSV_HEADER.join(",") + "\n");
+  const header = signed.indexOf(CSV_HEADER.join(",") + "\n") >= 0 ? CSV_HEADER : CSV_HEADER_V1;
+  const dataStart = signed.indexOf(header.join(",") + "\n");
+  const orgLine = lines.find(l => l.startsWith("# Org id: "));
+  const csvOrgId = orgLine ? orgLine.slice("# Org id: ".length).trim() : null;
   if (dataStart < 0) { problems.push("the column header row is missing or not the expected one"); return out; }
   const records = parseCsv(signed.slice(dataStart)).filter(r => !(r.length === 1 && r[0] === ""));
   const body = records.slice(1);
   const rows = body.map(r => ({
-    id: Number(r[0]), event_type: r[1], actor_email: r[2] === "" ? null : unneutralize(r[2]), resource_type: r[3], resource_id: r[4],
+    id: Number(r[0]), event_type: r[1], actor_email: r[2] === "" ? null : unneutralize(r[2]), resource_type: r[3], resource_id: r[4], actor_id: header.length > 9 ? (r[9] === "" ? null : r[9]) : null,
     payload: (() => { try { return JSON.parse(r[5]); } catch { return undefined; } })(), prev_hash: r[6] === "" ? null : r[6], entry_hash: r[7], created_at: r[8],
   }));
   out.events = rows.length; out.events_declared = Number.isNaN(declared) ? null : declared;
-  if (records.some(r => r.length !== CSV_HEADER.length)) problems.push("a row does not have the expected number of columns");
+  if (records.some(r => r.length !== header.length)) problems.push("a row does not have the expected number of columns");
   if (Number.isNaN(declared)) problems.push('the signed header has no "# Events:" count');
   else if (declared !== rows.length) problems.push(`the export declares ${declared} events but contains ${rows.length}`);
   if (rows.some(r => r.payload === undefined)) problems.push("an entry's payload is not valid JSON");
-  else checkRows(rows, problems, out);
+  else checkRows(rows, problems, out, csvOrgId);
   const claim = lines.find(l => l.startsWith("# Chain integrity: "));
   out.chain_integrity_claimed = claim ? claim.slice("# Chain integrity: ".length) : null;
   return out;

@@ -10,7 +10,9 @@
  * verification still checks their links and reports them as such, rather than calling them tampered.
  */
 
+import crypto from "crypto";
 import { buildAuditHash } from "./scanner";
+import { logger } from "./logger";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
 
@@ -73,6 +75,28 @@ export function auditEntryHash(prevHash: string | null, eventType: string, actor
   return buildAuditHash(prevHash, eventType, actorEmail ?? "system", canonicalJson(payload ?? {}), createdAtIso);
 }
 
+/** What an entry's v2 hash covers: everything that identifies it. (v1 covered only prev, type, actor email, payload, time.) */
+export interface AuditHashInput {
+  prev_hash: string | null; org_id: string; event_type: string; actor_id: string | null; actor_email: string | null;
+  resource_type: string | null; resource_id: string | null; payload: unknown; created_at: string;
+}
+
+/**
+ * Hash format v2: SHA-256 over "tl-audit-v2:" + the canonical JSON of an ARRAY of the fields (not a delimiter-joined
+ * string, so no value can shift into its neighbour). It covers org_id, actor_id, resource_type and resource_id, which v1
+ * left unprotected: changing who did something, or what it was done to, now breaks the hash. v2 needs no new column: a
+ * v2 entry is recognised by recomputing it (a v1 entry's stored hash cannot match a v2 preimage, nor the reverse), and
+ * once a chain has a v2 entry every later one must be v2 (checkAuditChain), so an entry cannot be re-hashed as v1 to
+ * dodge the metadata check.
+ */
+export function auditEntryHashV2(e: AuditHashInput): string {
+  return crypto.createHash("sha256").update("tl-audit-v2:" + canonicalJson([
+    e.prev_hash, e.org_id, e.event_type, e.actor_id, e.actor_email ?? "system", e.resource_type, e.resource_id, e.payload ?? {}, e.created_at,
+  ])).digest("hex");
+}
+
+const MAX_APPEND_ATTEMPTS = 6;
+
 export async function writeAuditLog(
   db: SupabaseClient<Database>,
   entry: AuditEntry,
@@ -99,38 +123,42 @@ async function _writeAuditLogInner(
   entry: AuditEntry,
   strict: boolean,
 ): Promise<void> {
-  // Read the most recent entry hash inside the (best-effort) lock.
-  const { data: prev } = await db
-    .from("audit_log")
-    .select("entry_hash")
-    .eq("org_id", entry.org_id)
-    .order("id", { ascending: false })
-    .limit(1)
-    .single() as { data: { entry_hash: string } | null };
+  let lastError = "unknown";
+  for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt++) {
+    // The newest entry is the parent. A failed read must NOT be treated as "no entries": that would append a second
+    // genesis entry and fork the chain.
+    const { data: prevRows, error: readError } = await db
+      .from("audit_log").select("entry_hash").eq("org_id", entry.org_id).order("id", { ascending: false }).limit(1) as
+      { data: Array<{ entry_hash: string }> | null; error: { message?: string } | null };
+    if (readError) { lastError = `read: ${readError.message ?? "unknown"}`; break; }
 
-  const now       = new Date().toISOString();
-  const prevHash  = prev?.entry_hash ?? null;
-  const entryHash = auditEntryHash(prevHash, entry.event_type, entry.actor_email ?? null, entry.payload, now);
+    const now       = new Date().toISOString();
+    const prevHash  = prevRows?.[0]?.entry_hash ?? null;
+    const row = {
+      org_id: entry.org_id, event_type: entry.event_type, actor_id: entry.actor_id ?? null, actor_email: entry.actor_email ?? null,
+      resource_type: entry.resource_type ?? null, resource_id: entry.resource_id ?? null, payload: entry.payload,
+    };
+    const entryHash = auditEntryHashV2({ ...row, prev_hash: prevHash, created_at: now });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (db.from("audit_log") as any).insert({
-    org_id:        entry.org_id,
-    event_type:    entry.event_type,
-    actor_id:      entry.actor_id ?? null,
-    actor_email:   entry.actor_email ?? null,
-    resource_type: entry.resource_type ?? null,
-    resource_id:   entry.resource_id ?? null,
-    payload:       entry.payload,
-    prev_hash:     prevHash,
-    entry_hash:    entryHash,
-    created_at:    now,
-  });
-  // Best-effort by default (existing callers log events after the fact); strict callers -- those that must not
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error } = await (db.from("audit_log") as any).insert({ ...row, org_id: entry.org_id, prev_hash: prevHash, entry_hash: entryHash, created_at: now });
+    if (!error) return;
+    lastError = error.message ?? "unknown";
+    // 23505 = another writer (another server instance) appended after our read: the database allows one child per parent
+    // (migration 20261128_audit_one_child_per_parent.sql). Read the new tail and try again instead of forking.
+    if (error.code !== "23505") break;
+  }
+  // Best-effort by default (callers log events after the fact), but never silent; strict callers -- those that must not
   // proceed without the record, e.g. organisation deletion -- get the failure.
-  if (error && strict) throw new Error(`audit_write_failed: ${error.message ?? "unknown"}`);
+  logger.error("Audit entry not written", { event: "audit_write_failed", org_id: entry.org_id, event_type: entry.event_type, error: lastError });
+  if (strict) throw new Error(`audit_write_failed: ${lastError}`);
 }
 
-export interface ChainRow { id: number; event_type: string; actor_email: string | null; payload: unknown; prev_hash: string | null; entry_hash: string; created_at: string }
+export interface ChainRow {
+  id: number; event_type: string; actor_email: string | null; payload: unknown; prev_hash: string | null; entry_hash: string; created_at: string;
+  /** Covered by hash v2. loadAuditRows fills them in; a row without org_id can only be checked as v1. */
+  org_id?: string; actor_id?: string | null; resource_type?: string | null; resource_id?: string | null;
+}
 
 /**
  * Explicit verification outcome, returned alongside the boolean `valid` for callers that need
@@ -138,7 +166,8 @@ export interface ChainRow { id: number; event_type: string; actor_email: string 
  *
  * - VALID:           every entry verified, no forks.
  * - FORK_DETECTED:   two or more entries share the same parent hash (concurrent writers created
- *                    a branch). The chain content is not corrupted, but ordering is ambiguous.
+ *                    a branch). Contents may all check out, but the history has two branches, so it is
+ *                    NOT a clean history: ordering is ambiguous and an entry could hide on the other branch.
  * - MISSING_RECORDS: an entry points at a prev_hash that is not in the loaded rows — a record
  *                    was deleted or the chain was truncated.
  * - INVALID:         an entry's contents no longer hash to their stored entry_hash — the row was
@@ -151,18 +180,22 @@ export type VerificationStatus = "VALID" | "FORK_DETECTED" | "MISSING_RECORDS" |
 export interface ChainVerification {
   /** Explicit status (see VerificationStatus). Use this instead of `valid` where possible. */
   status: VerificationStatus;
-  /** Backward-compatible boolean summary: true only when status is VALID or FORK_DETECTED. */
+  /** True only when status is VALID. A fork is not clean. */
   valid: boolean;
   total: number;
   /** Entries whose contents were recomputed and matched. */
   verified: number;
+  /** Of those, entries checked with hash v2 -- their org, actor and resource fields are covered too. The rest are v1 (contents only). */
+  metadata_verified: number;
   /** Older entries (before the first recomputable one) whose contents can't be recomputed; their links were checked. */
   legacy: number;
   /** Entries where two (or more) entries share the same prev_hash. FORK_DETECTED is set when this is > 0. */
   concurrent: number;
+  /** id of the first entry that shares its parent with an earlier one (set with FORK_DETECTED). */
+  fork_at?: number;
   /** id of the first entry that fails: its link points nowhere, or its recomputable contents changed. */
   broken_at?: number;
-  reason?: "missing_link" | "content_changed";
+  reason?: "missing_link" | "content_changed" | "downgraded";
   first_at: string | null;
   last_at: string | null;
 }
@@ -172,31 +205,41 @@ export interface ChainVerification {
  * the first recomputable one on recomputes to its stored hash.
  */
 export function checkAuditChain(rows: readonly ChainRow[]): ChainVerification {
-  const base = { total: rows.length, verified: 0, legacy: 0, concurrent: 0, first_at: rows[0]?.created_at ?? null, last_at: rows[rows.length - 1]?.created_at ?? null };
+  const base = { total: rows.length, verified: 0, metadata_verified: 0, legacy: 0, concurrent: 0, first_at: rows[0]?.created_at ?? null, last_at: rows[rows.length - 1]?.created_at ?? null };
   const seenHashes = new Set<string>();
   const linkedFrom = new Set<string>();
-  let recomputable = false;
-  let verified = 0, legacy = 0, concurrent = 0;
+  let recomputable = false, seenV2 = false;
+  let verified = 0, metadata = 0, legacy = 0, concurrent = 0, forkAt: number | undefined;
+  const so_far = () => ({ ...base, verified, metadata_verified: metadata, legacy, concurrent });
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     // Links: the first entry starts the chain; every other must point at an earlier entry's hash.
     if (i > 0 || r.prev_hash != null) {
       if (r.prev_hash == null || !seenHashes.has(r.prev_hash)) {
-        return { ...base, verified, legacy, concurrent, status: "MISSING_RECORDS", valid: false, broken_at: r.id, reason: "missing_link" };
+        return { ...so_far(), status: "MISSING_RECORDS", valid: false, broken_at: r.id, reason: "missing_link" };
       }
-      if (linkedFrom.has(r.prev_hash)) concurrent++;
+      if (linkedFrom.has(r.prev_hash)) { concurrent++; forkAt ??= r.id; }
       linkedFrom.add(r.prev_hash);
     }
-    // Contents: recompute from the stored row.
+    // Contents: recompute from the stored row -- v2 (covers org / actor / resource too) first, then v1.
     const at = Number.isNaN(Date.parse(r.created_at)) ? r.created_at : new Date(r.created_at).toISOString();
-    const ok = auditEntryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash;
-    if (ok) { recomputable = true; verified++; }
+    const v2 = r.org_id !== undefined && auditEntryHashV2({
+      prev_hash: r.prev_hash, org_id: r.org_id, event_type: r.event_type, actor_id: r.actor_id ?? null, actor_email: r.actor_email,
+      resource_type: r.resource_type ?? null, resource_id: r.resource_id ?? null, payload: r.payload, created_at: at,
+    }) === r.entry_hash;
+    if (v2) { recomputable = true; seenV2 = true; verified++; metadata++; }
+    else if (auditEntryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) {
+      // A v1 entry after a v2 one cannot be genuine: the writer has produced only v2 since the first. Otherwise a v2 entry
+      // could be re-hashed as v1 to make its metadata editable.
+      if (seenV2) return { ...so_far(), status: "INVALID", valid: false, broken_at: r.id, reason: "downgraded" };
+      recomputable = true; verified++;
+    }
     else if (!recomputable) legacy++;
-    else return { ...base, verified, legacy, concurrent, status: "INVALID", valid: false, broken_at: r.id, reason: "content_changed" };
+    else return { ...so_far(), status: "INVALID", valid: false, broken_at: r.id, reason: "content_changed" };
     seenHashes.add(r.entry_hash);
   }
   const status: VerificationStatus = concurrent > 0 ? "FORK_DETECTED" : "VALID";
-  return { ...base, verified, legacy, concurrent, status, valid: true };
+  return { ...so_far(), status, valid: status === "VALID", ...(forkAt !== undefined ? { fork_at: forkAt } : {}) };
 }
 
 const PAGE = 1000;
@@ -209,12 +252,12 @@ export async function loadAuditRows(db: SupabaseClient<Database>, org_id: string
     for (let from = 0; from < MAX_ROWS; from += PAGE) {
       const { data, error } = await db
         .from("audit_log")
-        .select("id, event_type, actor_email, payload, prev_hash, entry_hash, created_at")
+        .select("id, event_type, actor_id, actor_email, resource_type, resource_id, payload, prev_hash, entry_hash, created_at")
         .eq("org_id", org_id)
         .order("id", { ascending: true })
         .range(from, from + PAGE - 1) as { data: ChainRow[] | null; error: unknown };
       if (error) throw error;
-      rows.push(...(data ?? []));
+      rows.push(...(data ?? []).map(r => ({ ...r, org_id })));
       if (!data || data.length < PAGE) break;
     }
   } catch {
@@ -235,6 +278,7 @@ export async function verifyAuditChain(
       valid: false,
       total: rows.length,
       verified: 0,
+      metadata_verified: 0,
       legacy: 0,
       concurrent: 0,
       first_at: rows[0]?.created_at ?? null,

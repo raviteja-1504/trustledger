@@ -30,20 +30,33 @@ const sha256 = s => crypto.createHash("sha256").update(s).digest("hex");
 const entryHash = (prev, type, actor, payload, iso) =>
   sha256(`${prev == null ? "GENESIS" : prev}::${type}::${actor == null ? "system" : actor}::${canonicalJson(payload == null ? {} : payload)}::${iso}`);
 
-function checkChain(rows) {
-  const seen = new Set();
-  let recomputable = false;
+// Hash v2 (src/lib/audit.ts auditEntryHashV2): also covers org_id, actor_id, resource_type and resource_id. A "" resource
+// (how a CSV writes null) is null.
+const nul = v => (v == null || v === "" ? null : v);
+const entryHashV2 = (r, orgId, iso) => sha256("tl-audit-v2:" + canonicalJson([
+  nul(r.prev_hash), orgId, r.event_type, nul(r.actor_id), r.actor_email == null ? "system" : r.actor_email,
+  nul(r.resource_type), nul(r.resource_id), r.payload == null ? {} : r.payload, iso,
+]));
+
+function checkChain(rows, orgId) {
+  const seen = new Set(), parents = new Set();
+  let recomputable = false, seenV2 = false, forkAt = null;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (i > 0 || r.prev_hash != null) {
       if (r.prev_hash == null || !seen.has(r.prev_hash)) return { valid: false, broken_at: r.id, reason: "missing_link" };
     }
+    if (r.prev_hash != null) { if (parents.has(r.prev_hash) && forkAt == null) forkAt = r.id; parents.add(r.prev_hash); }
     const at = Number.isNaN(Date.parse(r.created_at)) ? r.created_at : new Date(r.created_at).toISOString();
-    if (entryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) recomputable = true;
+    if (orgId != null && entryHashV2(r, orgId, at) === r.entry_hash) { recomputable = true; seenV2 = true; }
+    else if (entryHash(r.prev_hash, r.event_type, r.actor_email, r.payload, at) === r.entry_hash) {
+      if (seenV2) return { valid: false, broken_at: r.id, reason: "downgraded" };   // old format after the new one: re-hashed to hide a change
+      recomputable = true;
+    }
     else if (recomputable) return { valid: false, broken_at: r.id, reason: "content_changed" };
     seen.add(r.entry_hash);
   }
-  return { valid: true };
+  return forkAt == null ? { valid: true } : { valid: false, forked: true, fork_at: forkAt };
 }
 
 function signatureOk(cp, pem) {
@@ -54,12 +67,13 @@ function signatureOk(cp, pem) {
 }
 
 function verify(orgId, rows, checkpoints, keys) {
-  const chain = checkChain(rows);
+  const chain = checkChain(rows, orgId);
   const problems = [];
   const keyById = new Map(keys.map(k => [k.id, k]));
   const sorted = [...checkpoints].sort((a, b) => a.payload.sequence - b.payload.sequence);
-  const flag = { invalid: false, untrusted: false, truncated: false, modified: !chain.valid };
-  if (!chain.valid) problems.push({ sequence: null, code: "chain_" + chain.reason, detail: "audit chain failed at entry " + chain.broken_at });
+  const flag = { invalid: false, untrusted: false, truncated: false, modified: !chain.valid && !chain.forked, forked: !!chain.forked };
+  if (chain.forked) problems.push({ sequence: null, code: "chain_forked", detail: "an audit entry shares its parent with an earlier one, from entry " + chain.fork_at });
+  else if (!chain.valid) problems.push({ sequence: null, code: "chain_" + chain.reason, detail: "audit chain failed at entry " + chain.broken_at });
   let prev = null;
   for (const cp of sorted) {
     const p = cp.payload, seq = p.sequence;
@@ -87,7 +101,7 @@ function verify(orgId, rows, checkpoints, keys) {
     prev = cp;
   }
   const status = flag.invalid ? "CHECKPOINT_INVALID" : flag.truncated ? "TRUNCATED" : flag.modified ? "HISTORY_MODIFIED"
-    : flag.untrusted ? "KEY_UNTRUSTED" : sorted.length === 0 ? "NO_CHECKPOINTS" : "VALID";
+    : flag.forked ? "CHAIN_FORKED" : flag.untrusted ? "KEY_UNTRUSTED" : sorted.length === 0 ? "NO_CHECKPOINTS" : "VALID";
   const latest = sorted.length ? sorted[sorted.length - 1].payload : null;
   return {
     status, entries: rows.length, checkpoints: sorted.length, latest_sequence: latest ? latest.sequence : null,

@@ -29,11 +29,11 @@ import { allRows } from "@/lib/allRows";
 import { csvLine } from "@/lib/csv";
 import crypto from "crypto";
 
-const EVENT_COLUMNS = "id, event_type, actor_email, resource_type, resource_id, payload, prev_hash, entry_hash, created_at";
+const EVENT_COLUMNS = "id, event_type, actor_email, actor_id, resource_type, resource_id, payload, prev_hash, entry_hash, created_at";
 // Not exported: a Next.js route file may only export its HTTP handlers and route config, or the build fails.
 const CSV_SIGNATURE_MARKER = "# --- signature ---";
-const CSV_FORMAT = "trustledger-audit-csv/1";
-const CSV_HEADER = ["id", "event_type", "actor_email", "resource_type", "resource_id", "payload", "prev_hash", "entry_hash", "created_at"] as const;
+const CSV_FORMAT = "trustledger-audit-csv/2";   // /2 adds the actor_id column (hash v2 covers it)
+const CSV_HEADER = ["id", "event_type", "actor_email", "resource_type", "resource_id", "payload", "prev_hash", "entry_hash", "created_at", "actor_id"] as const;
 
 /** A single line of text for a comment: no line breaks or control characters, so a name can't start a new line. */
 const CONTROL_CHARS = new RegExp("[" + String.fromCharCode(0) + "-" + String.fromCharCode(31, 127, 0x2028, 0x2029) + "]+", "g");
@@ -122,6 +122,7 @@ export async function GET(req: NextRequest) {
       e.id, e.event_type, e.actor_email, e.resource_type, e.resource_id,
       canonicalJson(e.payload ?? {}), e.prev_hash, e.entry_hash,
       Number.isNaN(Date.parse(String(e.created_at))) ? e.created_at : new Date(String(e.created_at)).toISOString(),
+      e.actor_id,
     ]));
     // What is signed: everything up to the signature marker, exactly as written (UTF-8, LF line endings).
     const body = [
@@ -132,7 +133,7 @@ export async function GET(req: NextRequest) {
       `# Period: ${start} — ${end}`,
       `# Generated: ${exportedAt}`,
       `# Events: ${eventList.length}`,
-      `# Chain integrity: ${chainResult.valid ? "VERIFIED" : "BROKEN (tampered)"}`,
+      `# Chain integrity: ${chainResult.status === "VALID" ? "VERIFIED" : chainResult.status === "FORK_DETECTED" ? `NOT CLEAN (forked: ${chainResult.concurrent} entr${chainResult.concurrent === 1 ? "y shares" : "ies share"} a parent with an earlier one)` : "BROKEN (tampered)"}`,
       "",
       csvLine(CSV_HEADER),
       ...rows,
