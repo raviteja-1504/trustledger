@@ -221,8 +221,8 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // which is exactly what "Peak/Current/Weekly Average all read 1000, only
   // one x-axis tick shown" means. Now computed via get_risk_trend(), a
   // Postgres function that does the GROUP BY server-side (see migration
-  // 20260914_risk_trend_rpc.sql) -- it returns at most 10 rows (one per
-  // week) no matter how many scan_files rows exist underneath it, so it's
+  // 20260914_risk_trend_rpc.sql) -- it returns one row per
+  // week of the period (a 10-week cap was removed in 20261127_risk_trend_all_weeks.sql: 90 days spans 14 weeks) no matter how many scan_files rows exist underneath it, so it's
   // both exact and immune to the row cap.
   const toMonday = (iso: string) => {
     const d = new Date(iso);
