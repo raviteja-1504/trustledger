@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { isProductionRuntime } from "@/lib/authBypass";
 
 const url  = process.env.NEXT_PUBLIC_SUPABASE_URL  ?? "";
 const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
@@ -78,11 +79,17 @@ export const supabase: SupabaseClient<any> = SUPABASE_CONFIGURED
 // ONLY import this in API routes / server components — never expose to browser.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createServiceClient(): SupabaseClient<any> {
-  if (!SUPABASE_CONFIGURED) return makeStubClient();
+  // Fail closed in production. The stub below answers every query with "no data, no error", and the anon-key fallback
+  // quietly returns nothing under RLS: a deployment missing its Supabase settings would not fail, it would run -- reading
+  // empty, "saving" nothing, and reporting success. Only a development / test / demo run may use them.
+  if (!SUPABASE_CONFIGURED) {
+    if (isProductionRuntime()) throw new Error("supabase_not_configured: NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY must be set in production");
+    return makeStubClient();
+  }
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!serviceKey) {
-    // Misconfiguration: falling back to anon key means RLS is NOT bypassed.
-    // All service-role operations will silently fail or return empty data.
+    if (isProductionRuntime()) throw new Error("supabase_service_key_missing: SUPABASE_SERVICE_ROLE_KEY must be set in production");
+    // Development: falling back to the anon key means RLS is NOT bypassed, so service-role operations return empty data.
     console.error("[TrustLedger] SUPABASE_SERVICE_ROLE_KEY is not set. API routes will use the anon key and RLS will NOT be bypassed. Set this env var in production.");
   }
   return createClient(url, serviceKey ?? anon, {

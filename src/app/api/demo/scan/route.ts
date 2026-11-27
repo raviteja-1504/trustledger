@@ -4,11 +4,12 @@
  */
 import { NextResponse } from "next/server";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { getClientIp } from "@/lib/clientIp";
 import { DemoScanBody, scanDemo } from "@/lib/demoScan";
 
 export async function POST(req: Request) {
-  // the platform's own client address first: x-forwarded-for's left-most entry is whatever the client wrote
-  const ip = req.headers.get("x-real-ip") ?? req.headers.get("x-forwarded-for")?.split(",").pop()?.trim() ?? "unknown";
+  // the same trusted client address as every other limit (lib/clientIp.ts): never a header the client can write
+  const ip = getClientIp(req.headers);
   const rl = await checkRateLimit(ip, { limit: 20, windowMs: 60_000, prefix: "demo-scan" });
   if (!rl.success) return NextResponse.json({ error: "too_many_requests" }, { status: 429, headers: rl.headers });
   let json: unknown;
