@@ -102,6 +102,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "unknown_control_id", framework: fw.framework_id, valid_controls: fw.controls.map(c => c.control_id) }, { status: 400 });
   }
 
+  // A record may cite a scan, an attestation or a repository, but only this organisation's own: a cited id is checked against
+  // the organisation, so a record cannot claim a link to someone else's data (or to something that does not exist).
+  const refDb = createServiceClient();
+  const refs: Array<[string, string | undefined, string]> = [
+    ["scans", body.scan_id, "scan_id"], ["attestations", body.attestation_id, "attestation_id"], ["repositories", body.repository_id, "repository_id"],
+  ];
+  for (const [table, id, field] of refs) {
+    if (id === undefined || id === null) continue;
+    if (typeof id !== "string" || !id) return NextResponse.json({ error: "invalid_reference", field }, { status: 400 });
+    const { data: found, error: refErr } = await refDb.from(table).select("id").eq("id", id).eq("org_id", auth.org_id).maybeSingle();
+    if (refErr) return NextResponse.json({ error: "reference_check_failed", field }, { status: 500 });
+    if (!found) return NextResponse.json({ error: "invalid_reference", field, message: "That " + field.replace("_id", "") + " was not found in this organisation." }, { status: 400 });
+  }
+
   const now = new Date();
   const record = buildEvidenceRecord({
     evidence_id:         crypto.randomUUID(),

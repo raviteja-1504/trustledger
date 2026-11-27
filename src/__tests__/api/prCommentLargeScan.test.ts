@@ -38,6 +38,7 @@ beforeEach(() => {
       id: `f-${i}`, scan_id: SCAN, org_id: "org-1", file_path: path(i), risk_score: i >= N - 10 ? "CRITICAL" : "LOW",
       ai_percentage: 0, risk_indicators: i >= N - 10 ? ["sql-injection"] : [],
     })),
+    github_installations: [{ id: "gi-1", org_id: "org-1", installation_id: 1 }],
     attestations: Array.from({ length: N }, (_, i) => ({ id: `a-${i}`, org_id: "org-1", scan_id: SCAN, file_path: path(i) })),
   }, { maxRows: 1000 });
 });

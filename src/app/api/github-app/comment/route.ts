@@ -180,11 +180,21 @@ export async function POST(req: NextRequest) {
   // Fetch scan + files
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, pr_number, overall_risk, total_ai_percentage")
+    .select("id, repo_full_name, pr_number, overall_risk, total_ai_percentage, installation_id")
     .eq("id", body.scan_id).eq("org_id", org_id)
     .single() as { data: Record<string, unknown> | null };
 
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
+
+  // WHERE the comment goes is decided by the scan (which this organisation owns), never by the request: a body that names
+  // another repository or pull request, or another organisation's GitHub installation, would make the app post on someone
+  // else's PR with their installation's token.
+  const repoFullName = scan.repo_full_name as string;
+  const prNumber = scan.pr_number as number | null;
+  if (!prNumber) return NextResponse.json({ error: "scan_has_no_pr", message: "This scan didn't come from a pull request, so there is nothing to comment on." }, { status: 409 });
+  if (body.repo !== repoFullName || Number(body.pr_number) !== prNumber) {
+    return NextResponse.json({ error: "scan_mismatch", message: "The repository and pull request must be the ones this scan was run on." }, { status: 400 });
+  }
 
   // Paged (lib/allRows.ts): past 1000 rows the comment described part of the scan.
   const { data: files } = await allRows((f, t) => db
@@ -208,30 +218,29 @@ export async function POST(req: NextRequest) {
     ...f, attested: attestedPaths.has(f.file_path),
   }));
 
-  // Get GitHub token
+  // Get GitHub token: only an installation this organisation has connected (the one the scan ran through, or a named one that is
+  // really the organisation's own).
+  const { data: installs } = await db
+    .from("github_installations")
+    .select("installation_id")
+    .eq("org_id", org_id) as { data: Array<{ installation_id: number }> | null };
+  const own = new Set((installs ?? []).map(i => Number(i.installation_id)));
+  const wanted = [body.installation_id, scan.installation_id, ...(installs ?? []).map(i => i.installation_id)]
+    .map(Number).find(id => Number.isFinite(id) && id > 0 && own.has(id));
   let token: string | null = null;
-  if (body.installation_id) {
-    try { const t = await getInstallationToken(body.installation_id); token = t.token; } catch {}
-  } else {
-    const { data: install } = await db
-      .from("github_installations")
-      .select("installation_id")
-      .eq("org_id", org_id)
-      .single() as { data: { installation_id: number } | null };
-    if (install) {
-      try { const t = await getInstallationToken(install.installation_id); token = t.token; } catch {}
-    }
+  if (wanted) {
+    try { const t = await getInstallationToken(wanted); token = t.token; } catch {}
   }
 
   if (!token) return NextResponse.json({ error: "no_github_token" }, { status: 422 });
 
-  const [owner, repoName] = body.repo.split("/");
+  const [owner, repoName] = repoFullName.split("/");
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev";
 
   const comment = buildPRComment({
     scan_id:            body.scan_id,
-    repo:               body.repo,
-    pr_number:          body.pr_number,
+    repo:               repoFullName,
+    pr_number:          prNumber,
     overall_risk:       scan.overall_risk as string,
     total_ai_percentage:scan.total_ai_percentage as number,
     files:              filesWithAttest,
@@ -239,8 +248,8 @@ export async function POST(req: NextRequest) {
   });
 
   // Find existing TrustLedger comment to update (avoid spam)
-  const existingId = await findExistingComment(token, owner, repoName, body.pr_number);
-  await upsertComment(token, owner, repoName, body.pr_number, comment, existingId);
+  const existingId = await findExistingComment(token, owner, repoName, prNumber);
+  await upsertComment(token, owner, repoName, prNumber, comment, existingId);
 
   return NextResponse.json({ ok: true, updated: !!existingId });
 }

@@ -12,7 +12,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { deliverWebhook, type WebhookEventType } from "@/lib/outboundWebhook";
+import { isPublicHttpUrl } from "@/lib/outboundUrl";
+import { requireAudit } from "@/lib/auditRequired";
 import crypto from "crypto";
+
+/** An outbound endpoint must be https and public. (Delivery checks again, against the address it really connects to.) */
+const acceptableUrl = (raw: string): boolean => { try { return new URL(raw).protocol === "https:" && isPublicHttpUrl(raw); } catch { return false; } };
+/** What is recorded about an endpoint: where it points, never the query string or credentials in it. */
+const where = (raw: string): string => { try { const u = new URL(raw); return u.origin + u.pathname; } catch { return "invalid"; } };
 
 const ALL_EVENTS: WebhookEventType[] = [
   "scan.completed","violation.opened","violation.resolved",
@@ -103,7 +110,14 @@ export async function POST(req: NextRequest) {
     .select("id, url, events, enabled, created_at")
     .single() as { data: unknown; error: unknown };
 
-  if (insErr) return NextResponse.json({ error:"insert_failed" }, { status:500 });
+  if (insErr || !data) return NextResponse.json({ error:"insert_failed" }, { status:500 });
+  // A new outbound endpoint is where this organisation's event data is sent: recorded, or not created.
+  const created = data as { id: string };
+  const auditFailed = await requireAudit(db, {
+    org_id, event_type: "org_settings_changed", actor_id: user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "webhook", resource_id: created.id, payload: { action: "created", endpoint: where(body.url), events: body.events ?? ALL_EVENTS },
+  }, { undo: async () => { const { error: undoErr } = await db.from("webhook_configs").delete().eq("id", created.id).eq("org_id", org_id); if (undoErr) throw undoErr; } });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ webhook: data });
 }
 
@@ -116,6 +130,11 @@ export async function PATCH(req: NextRequest) {
 
   const body = await req.json() as { id:string; url?:string; events?:WebhookEventType[]; enabled?:boolean; secret?:string };
   if (!body.id) return NextResponse.json({ error:"missing_id" }, { status:400 });
+  // The same rule as creating one: an endpoint cannot be pointed at a private address or a plain-http URL by editing it.
+  if (body.url !== undefined && !acceptableUrl(body.url)) return NextResponse.json({ error:"url_not_allowed" }, { status:400 });
+  if (body.events !== undefined && (!Array.isArray(body.events) || body.events.some(e => !ALL_EVENTS.includes(e)))) {
+    return NextResponse.json({ error:"invalid_events", valid: ALL_EVENTS }, { status:400 });
+  }
 
   const db = createServiceClient();
   const updates: Record<string, unknown> = {};
@@ -124,7 +143,15 @@ export async function PATCH(req: NextRequest) {
   if (body.enabled !== undefined) updates.enabled = body.enabled;
   if (body.secret  !== undefined) updates.secret  = body.secret;
 
-  await db.from("webhook_configs").update(updates).eq("id", body.id).eq("org_id", org_id);
+  const { data: changed, error: updErr } = await db.from("webhook_configs").update(updates).eq("id", body.id).eq("org_id", org_id).select("id") as { data: Array<{ id: string }> | null; error: unknown };
+  if (updErr) return NextResponse.json({ error:"update_failed" }, { status:500 });
+  if (!changed || changed.length === 0) return NextResponse.json({ error:"webhook_not_found" }, { status:404 });
+  const auditFailed = await requireAudit(db, {
+    org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "webhook", resource_id: body.id,
+    payload: { action: "updated", changed: Object.keys(updates).filter(k => k !== "secret"), secret_changed: body.secret !== undefined, ...(body.url !== undefined ? { endpoint: where(body.url) } : {}) },
+  });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ ok: true });
 }
 
@@ -139,6 +166,14 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error:"missing_id" }, { status:400 });
 
   const db = createServiceClient();
-  await db.from("webhook_configs").delete().eq("id", id).eq("org_id", org_id);
+  const { data: removed, error: delErr } = await db.from("webhook_configs").delete().eq("id", id).eq("org_id", org_id).select("id") as { data: Array<{ id: string }> | null; error: unknown };
+  if (delErr) return NextResponse.json({ error:"delete_failed" }, { status:500 });
+  if (!removed || removed.length === 0) return NextResponse.json({ error:"webhook_not_found" }, { status:404 });
+  // Removing an endpoint stays in force even if it cannot be recorded (the safe direction); the caller is told it was not recorded.
+  const auditFailed = await requireAudit(db, {
+    org_id, event_type: "org_settings_changed", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "webhook", resource_id: id, payload: { action: "deleted" },
+  });
+  if (auditFailed) return auditFailed;
   return NextResponse.json({ ok: true });
 }
