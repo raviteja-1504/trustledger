@@ -44,7 +44,7 @@ DECLARE
     'scan_files', 'scan_schedules', 'scans', 'scim_tokens', 'secret_findings', 'shadow_ai_triage', 'sso_connections',
     'sso_domains', 'trust_score_history', 'violation_overrides', 'violations', 'webhook_configs',
     'webhook_deliveries', 'webhook_delivery_log',
-    'webhook_failed_deliveries'
+    'webhook_failed_deliveries', 'scan_jobs'
   ];
   remaining text[];
   t         text;

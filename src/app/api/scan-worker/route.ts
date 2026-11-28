@@ -11,6 +11,7 @@
  */
 
 import { readTextLimited } from "@/lib/readBody";
+import { claimJob, finishJob, failureReason } from "@/lib/scanJobs";
 import { NextRequest, NextResponse } from "next/server";
 import { Receiver } from "@upstash/qstash";
 import { createServiceClient } from "@/lib/supabase";
@@ -127,11 +128,36 @@ async function markDelivery(
 
 // Each job runs inside its trace (the ID the webhook / dashboard request put on the job), so every log line and
 // event below joins that PR's timeline on the Trace page.
+/** What the worker learns about the job's ledger row while it runs (lib/scanJobs.ts). */
+interface LedgerRun { orgId?: string; jobId?: string; attempts?: number }
+
 export async function POST(req: NextRequest) {
-  return runWithTrace({ trace_id: newTraceId() }, () => handle(req));
+  return runWithTrace({ trace_id: newTraceId() }, async () => {
+    const ledger: LedgerRun = {};
+    let res: Response;
+    try {
+      res = await handle(req, ledger);
+    } catch (err) {
+      await settleLedger(ledger, { ok: false, error: `scan_failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) });
+      throw err;
+    }
+    if (ledger.jobId) {
+      const body = await res.clone().json().catch(() => ({})) as { error?: unknown; message?: unknown; skipped?: boolean; reason?: string; superseded_at_finish?: boolean; scan_id?: string };
+      // A 5xx is the worker saying "try again" (QStash retries it); anything else is the job done, even when it was a no-op.
+      await settleLedger(ledger, res.status >= 500
+        ? { ok: false, error: failureReason(body, res.status) }
+        : { ok: true, result: body.skipped ? (body.reason ?? "skipped") : body.superseded_at_finish ? "superseded_at_finish" : "scanned", scan_id: body.scan_id ?? null });
+    }
+    return res;
+  });
 }
 
-async function handle(req: NextRequest) {
+async function settleLedger(ledger: LedgerRun, outcome: Parameters<typeof finishJob>[4]): Promise<void> {
+  if (!ledger.jobId || !ledger.orgId) return;
+  try { await finishJob(createServiceClient(), ledger.orgId, ledger.jobId, ledger.attempts ?? 1, outcome); } catch { /* the ledger never breaks a scan */ }
+}
+
+async function handle(req: NextRequest, ledger: LedgerRun = {}) {
   const rawBody = await readTextLimited(req, MAX_WORKER_BODY_BYTES);
   if (rawBody === null) return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
 
@@ -168,6 +194,17 @@ async function handle(req: NextRequest) {
   const [owner, repoName] = repoFullName.split("/");
   const db = createServiceClient();
   let persistedScanId: string | null = null;
+
+  // Claim the job in the ledger: two deliveries of the same job (a QStash retry racing the first run, a duplicate webhook) cannot both
+  // run it. No ledger row (or no ledger) means run as before.
+  if (job.job_id && orgId) {
+    const claim = await claimJob(db, orgId, job.job_id);
+    if (!claim.claimed) {
+      void recordEvent({ kind: "scan.skipped", message: "This job is already running or finished", data: { head_sha: headSha, job_id: job.job_id } });
+      return NextResponse.json({ ok: true, skipped: true, reason: "job_already_handled" });
+    }
+    if (claim.ledger) { ledger.orgId = orgId; ledger.jobId = job.job_id; ledger.attempts = claim.attempts; }
+  }
 
   // Idempotency: if a scan for this commit already exists, skip (QStash retry safety). Scoped to this job's
   // org: the same repo connected to two orgs must never have one org's scan count as the other's.

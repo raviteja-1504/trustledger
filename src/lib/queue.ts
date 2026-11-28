@@ -1,6 +1,8 @@
 import { Client } from "@upstash/qstash";
 import { sendSlackAlert } from "@/lib/alertDelivery";
 import { internalSecret } from "@/lib/internalSecret";
+import { createServiceClient } from "@/lib/supabase";
+import { registerJob, markNotQueued } from "@/lib/scanJobs";
 
 export interface ScanJob {
   org_id:           string | null;
@@ -25,6 +27,8 @@ export interface ScanJob {
   force?:           boolean;
   // Follows the job from webhook / dashboard request through the worker (lib/trace.ts, Trace page).
   trace_id?:        string;
+  // The job's row in the scan job ledger (lib/scanJobs.ts): lets the worker claim it once, and the organisation see and replay it.
+  job_id?:          string;
 }
 
 /** The scan did not get queued or run. `workerResponded` means the worker did run and reported its own failure (it has already updated the check run). */
@@ -71,7 +75,45 @@ async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
   if (!res.ok) throw new ScanNotQueuedError(`scan-worker answered ${res.status}`, true);
 }
 
+/**
+ * Queue a scan. The job is recorded in the ledger first (its original payload, for retries and replay); a second delivery of a job
+ * that is already queued or running is dropped here instead of becoming a second scan. If the job never reaches a worker it is
+ * marked failed, with the reason, so it shows up -- and can be replayed -- instead of vanishing.
+ */
 export async function enqueueScan(job: ScanJob): Promise<void> {
+  let db: ReturnType<typeof createServiceClient> | null = null;
+  try { db = createServiceClient(); } catch { db = null; }
+  const registered = db ? await registerJob(db, job) : null;
+  if (registered?.duplicate) {
+    console.log("[queue] the same job is already queued or running; not queuing it again", registered.id);
+    return;
+  }
+  const queued = registered ? { ...job, job_id: registered.id } : job;
+  try {
+    await enqueueNow(queued);
+  } catch (err) {
+    // Anything that stopped the job before a worker took it (no queue, no secret, the call itself failing). When the worker answered with
+    // its own failure it has already settled the job in the ledger.
+    if (db && registered && job.org_id && !(err instanceof ScanNotQueuedError && err.workerResponded)) {
+      await markNotQueued(db, job.org_id, registered.id, err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
+}
+
+/** Queue a job that already has its ledger row (a replay): no second registration, same failure bookkeeping. */
+export async function requeueJob(job: ScanJob): Promise<void> {
+  try {
+    await enqueueNow(job);
+  } catch (err) {
+    if (job.job_id && job.org_id && !(err instanceof ScanNotQueuedError && err.workerResponded)) {
+      try { await markNotQueued(createServiceClient(), job.org_id, job.job_id, err instanceof Error ? err.message : String(err)); } catch { /* best effort */ }
+    }
+    throw err;
+  }
+}
+
+async function enqueueNow(job: ScanJob): Promise<void> {
   const appUrl = cleanEnv(process.env.NEXT_PUBLIC_APP_URL)
     || cleanEnv(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
   const workerUrl = `${appUrl}/api/scan-worker`;

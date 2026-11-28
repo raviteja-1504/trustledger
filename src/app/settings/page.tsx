@@ -3,6 +3,7 @@
 import { ApiAccessTab } from "@/components/settings/ApiAccessTab";
 import DeleteOrganisation from "@/components/settings/DeleteOrganisation";
 import MfaPolicy from "@/components/settings/MfaPolicy";
+import ScanQueue from "@/components/settings/ScanQueue";
 import { useEffect, useState, useCallback } from "react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
@@ -1667,6 +1668,10 @@ function PrivacyTab() {
             Reset organisation data
           </button>
         </div>
+      </SectionCard>
+
+      <SectionCard title="Scan queue" subtitle="Scans waiting, running, finished and failed in the last 7 days. A failed scan keeps its original request, so you can replay it.">
+        <ScanQueue />
       </SectionCard>
 
       <SectionCard title="Two-factor authentication policy" subtitle="Require everyone in the organisation to use an authenticator app.">
