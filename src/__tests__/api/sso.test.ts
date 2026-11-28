@@ -17,7 +17,7 @@ jest.mock("@/lib/supabase", () => ({
   createServiceClient: () => ({ ...db.client, auth: { getUser: (t: string) => getUser(t), admin: { getUserById: (id: string) => getUserById(id) } } }),
 }));
 const cacheDel = jest.fn(async (_k: string) => {});
-jest.mock("@/lib/cache", () => ({ cached: async (_k: string, _t: number, fn: () => unknown) => fn(), cacheDel: (k: string) => cacheDel(k), cacheKeys: {} }));
+jest.mock("@/lib/cache", () => ({ cached: async (_k: string, _t: number, fn: () => unknown) => fn(), memoryCached: async (_k: string, _t: number, fn: () => unknown) => fn(), cacheDel: (k: string) => cacheDel(k), cacheKeys: {} }));
 jest.mock("@/lib/audit", () => ({ writeAuditLog: jest.fn(async () => {}) }));
 const resolveTxt = jest.fn();
 jest.mock("dns", () => ({ promises: { resolveTxt: (h: string) => resolveTxt(h) } }));

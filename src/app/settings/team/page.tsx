@@ -63,6 +63,7 @@ export default function TeamPage() {
   const [resending,    setResending]    = useState<string | null>(null);
   const [resendLink,   setResendLink]   = useState<{ email: string; link: string } | null>(null);
   const [actionError,  setActionError]  = useState<string | null>(null);
+  const [notice,        setNotice]       = useState<string | null>(null);
 
   // Custom roles (Settings → Custom Roles) and who holds which
   const [customRoles,  setCustomRoles]  = useState<CustomRole[]>([]);
@@ -150,8 +151,16 @@ export default function TeamPage() {
       const qs = m.user_id ? `user_id=${m.user_id}` : `member_id=${m.id}`;
       await authedFetch(`/api/team?${qs}`, { method: "DELETE" });
       setMembers(prev => prev.filter(x => x.id !== m.id));
-    } catch { /* ignore */ }
+    } catch (err) { setActionError(err instanceof Error ? err.message : "Couldn't remove that member."); }
     finally { setRemoving(null); }
+  }
+
+  /** Ends every session the member has; they must sign in again. Their role and the org's API keys are untouched. */
+  async function signOutEverywhere(m: Member) {
+    if (!m.user_id || !confirm(`Sign ${m.email} out of every session? They will need to sign in again.`)) return;
+    setActionError(null);
+    try { await authedFetch("/api/team/sessions", { method: "POST", body: JSON.stringify({ user_id: m.user_id }) }); setNotice(`${m.email} was signed out.`); }
+    catch (err) { setActionError(err instanceof Error ? err.message : "Couldn't sign that member out."); }
   }
 
   async function resendInvite(email: string) {
@@ -239,6 +248,13 @@ export default function TeamPage() {
               )}
             </div>
           </form>
+        )}
+
+        {notice && (
+          <div role="status" className="section-card px-5 py-3 text-sm text-emerald-700 flex items-center justify-between gap-3">
+            <span>{notice}</span>
+            <button onClick={() => setNotice(null)} className="text-xs text-gray-400 hover:text-gray-600">Dismiss</button>
+          </div>
         )}
 
         {actionError && (
@@ -349,6 +365,16 @@ export default function TeamPage() {
                               className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2.5 py-1 rounded-lg transition-colors shrink-0 disabled:opacity-50"
                             >
                               {resending === m.email ? "…" : "↺ Resend"}
+                            </button>
+                          )}
+
+                          {isAdmin && !isCurrentUser && m.user_id && (
+                            <button
+                              onClick={() => signOutEverywhere(m)}
+                              className="shrink-0 text-xs font-semibold text-gray-500 hover:text-gray-800 transition-colors px-2 py-1 rounded-lg hover:bg-gray-100"
+                              title="End all of this member's sessions"
+                            >
+                              Sign out
                             </button>
                           )}
 

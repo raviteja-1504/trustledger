@@ -2,6 +2,7 @@
 
 import { ApiAccessTab } from "@/components/settings/ApiAccessTab";
 import DeleteOrganisation from "@/components/settings/DeleteOrganisation";
+import MfaPolicy from "@/components/settings/MfaPolicy";
 import { useEffect, useState, useCallback } from "react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
@@ -1666,6 +1667,10 @@ function PrivacyTab() {
             Reset organisation data
           </button>
         </div>
+      </SectionCard>
+
+      <SectionCard title="Two-factor authentication policy" subtitle="Require everyone in the organisation to use an authenticator app.">
+        <MfaPolicy />
       </SectionCard>
 
       <SectionCard title="Delete Organisation" subtitle="Permanently delete this organisation and its data, after a waiting period you can cancel. Audit evidence is kept.">

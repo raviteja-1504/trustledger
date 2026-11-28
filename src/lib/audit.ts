@@ -50,6 +50,7 @@ export type AuditEventType =
   | "data_exported"
   | "evidence_uploaded" | "evidence_deleted"
   | "ai_tool_policy_changed" | "shadow_ai_triaged"
+  | "member_sessions_revoked"
   | "org_deletion_requested" | "org_deletion_cancelled" | "org_deletion_started" | "org_deleted"
   | "audit_forks_reviewed";
 
@@ -63,7 +64,7 @@ export type AuditEventType =
  */
 export const REQUIRED_AUDIT_EVENTS: ReadonlySet<AuditEventType> = new Set<AuditEventType>([
   "attestation",
-  "member_invited", "member_role_changed", "member_removed", "user_added", "user_removed",
+  "member_invited", "member_role_changed", "member_removed", "member_sessions_revoked", "user_added", "user_removed",
   "api_key_created", "api_key_revoked",
   "policy_change", "ai_tool_policy_changed", "org_settings_changed", "exception_created", "exception_resolved",
   "data_exported",

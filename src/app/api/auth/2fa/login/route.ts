@@ -48,6 +48,11 @@ export async function POST(req: NextRequest) {
   if (!member || !twoFa?.enabled || !twoFa.secret) return NextResponse.json({ error: "not_enabled" }, { status: 400 });
   if (!sessionId) return NextResponse.json({ error: "invalid_token" }, { status: 401 });
 
+  // A session whose sessions were ended by an admin cannot sign itself back in: only a new sign-in starts a new session.
+  if (member.active_session_id === `revoked:${sessionId}`) {
+    return NextResponse.json({ error: "session_revoked", message: "This session was ended. Sign in again." }, { status: 401 });
+  }
+
   const rl = await checkRateLimit(user.id, { limit: 10, windowMs: 15 * 60_000, prefix: "2fa-login" });
   if (!rl.success) {
     return NextResponse.json(

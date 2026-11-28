@@ -98,6 +98,11 @@ export default function ProfilePage() {
   const [saved,        setSaved]       = useState(false);
   const [loading,      setLoading]     = useState(true);
   const [tab,          setTab]         = useState<"profile"|"security"|"notifications">("profile");
+  // Sent here by the organisation's two-factor requirement (?mfa=required): open the page where it is switched on.
+  const [mfaRequired, setMfaRequired] = useState(false);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("mfa") === "required") { setMfaRequired(true); setTab("security"); }
+  }, []);
   const [disableCode,  setDisableCode] = useState("");
   const [disabling,    setDisabling]   = useState(false);
 
@@ -240,6 +245,11 @@ export default function ProfilePage() {
         {/* ── Security tab ── */}
         {tab === "security" && (
           <div className="space-y-4">
+            {mfaRequired && !twoFA.enabled && (
+              <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+                <strong>Your organisation requires two-factor authentication.</strong> Turn it on below to keep using TrustLedger.
+              </div>
+            )}
             {/* 2FA */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
               <div className="flex items-start justify-between gap-4 mb-4">

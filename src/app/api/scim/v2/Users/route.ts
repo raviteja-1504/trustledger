@@ -21,6 +21,7 @@ import { logger } from "@/lib/logger";
 import crypto from "crypto";
 import { verifyScimRequest, scimMayProvision } from "@/lib/scimAuth";
 import { requireAudit } from "@/lib/auditRequired";
+import { parseScimRoles } from "@/lib/scimRoles";
 
 const SCIM_CONTENT_TYPE = "application/scim+json";
 
@@ -37,6 +38,7 @@ function scimUser(member: Record<string, unknown>, host: string) {
     name:       { formatted: member.name as string ?? member.email },
     emails:     [{ value: member.email as string, primary: true }],
     active:     true,
+    ...(typeof member.role === "string" ? { roles: [{ value: member.role, primary: true }] } : {}),
     meta: {
       resourceType: "User",
       location:     `${host}/api/scim/v2/Users/${member.user_id as string}`,
@@ -97,6 +99,7 @@ export async function POST(req: NextRequest) {
     name?:     { formatted?: string; givenName?: string; familyName?: string };
     emails?:   Array<{ value: string; primary?: boolean }>;
     active?:   boolean;
+    roles?:    unknown;
   };
 
   const email   = body.userName ?? body.emails?.find(e => e.primary)?.value ?? "";
@@ -110,6 +113,13 @@ export async function POST(req: NextRequest) {
       detail:  "userName is required",
     }, { status: 400, headers: { "Content-Type": SCIM_CONTENT_TYPE } });
   }
+
+  // A role the IdP asks for (its group mapping): below admin only, and a role we do not know is an error, not "developer".
+  const asked = parseScimRoles(body.roles);
+  if (!asked.ok) {
+    return NextResponse.json({ schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: "400", scimType: "invalidValue", detail: asked.detail }, { status: 400, headers: { "Content-Type": SCIM_CONTENT_TYPE } });
+  }
+  const role = asked.role ?? "developer";
 
   const db = createServiceClient();
 
@@ -145,7 +155,7 @@ export async function POST(req: NextRequest) {
     user_id:  authUser.user.id,
     email,
     name:     name || null,
-    role:     "developer",
+    role,
   }, { onConflict: "org_id,user_id" });
   if (memberErr) {
     const refId = crypto.randomBytes(4).toString("hex");
@@ -158,11 +168,11 @@ export async function POST(req: NextRequest) {
   // Granting access is recorded or undone: a member nobody can account for must not exist.
   const auditFailed = await requireAudit(db, {
     org_id: auth.org_id, event_type: "user_added", actor_id: null, actor_email: "scim",
-    resource_type: "user", resource_id: authUser.user.id, payload: { via: "scim", email, role: "developer" },
+    resource_type: "user", resource_id: authUser.user.id, payload: { via: "scim", email, role },
   }, { undo: async () => { const { error: undoErr } = await db.from("org_members").delete().eq("org_id", auth.org_id).eq("user_id", authUser.user.id); if (undoErr) throw undoErr; } });
   if (auditFailed) return auditFailed;
 
-  const member = { user_id: authUser.user.id, email, name, org_id: auth.org_id };
+  const member = { user_id: authUser.user.id, email, name, org_id: auth.org_id, role };
   return NextResponse.json(scimUser(member, host), {
     status:  201,
     headers: { "Content-Type": SCIM_CONTENT_TYPE },

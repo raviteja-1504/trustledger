@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyScimRequest } from "@/lib/scimAuth";
 import { requireAudit } from "@/lib/auditRequired";
+import { parseScimRoles } from "@/lib/scimRoles";
 
 const SCIM_CONTENT_TYPE = "application/scim+json";
 
@@ -22,6 +23,7 @@ function scimUser(member: Record<string, unknown>, host: string) {
     name:     { formatted: (member.name as string) ?? member.email },
     emails:   [{ value: member.email as string, primary: true }],
     active:   true,
+    ...(typeof member.role === "string" ? { roles: [{ value: member.role, primary: true }] } : {}),
     meta: { resourceType: "User", location: `${host}/api/scim/v2/Users/${member.user_id as string}` },
   };
 }
@@ -90,6 +92,28 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   const member = await getMember(db, auth.org_id, params.id);
   if (!member) return new NextResponse("", { status: 404 });
+
+  // Role pushed by the IdP (a group-to-role mapping): { op: "replace", path: "roles", value: [{ value: "security_reviewer" }] }.
+  // Below admin only; an admin's role is never changed through SCIM, in either direction.
+  const roleOp = body.Operations?.find(op => ["replace", "add"].includes(op.op?.toLowerCase()) && op.path === "roles");
+  if (roleOp) {
+    const scimError = (status: number, detail: string, scimType?: string) => NextResponse.json({ schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: String(status), ...(scimType ? { scimType } : {}), detail }, { status, headers: { "Content-Type": SCIM_CONTENT_TYPE } });
+    const asked = parseScimRoles(roleOp.value);
+    if (!asked.ok) return scimError(400, asked.detail, "invalidValue");
+    if (asked.role === null) return scimError(400, "No role given.", "invalidValue");
+    if (member.role === "admin" || member.role === "platform_admin") return scimError(403, "An admin's role is changed in TrustLedger, not through SCIM.");
+    const previousRole = member.role;
+    if (previousRole !== asked.role) {
+      const { error: roleErr } = await db.from("org_members").update({ role: asked.role }).eq("org_id", auth.org_id).eq("user_id", params.id);
+      if (roleErr) return scimError(500, "Could not change the role.");
+      const failed = await requireAudit(db, {
+        org_id: auth.org_id, event_type: "member_role_changed", actor_id: null, actor_email: "scim",
+        resource_type: "user", resource_id: params.id, payload: { via: "scim", email: member.email ?? null, from: previousRole, new_role: asked.role },
+      });
+      if (failed) return failed;
+      member.role = asked.role;
+    }
+  }
 
   return NextResponse.json(scimUser(member, new URL(req.url).origin), {
     headers: { "Content-Type": SCIM_CONTENT_TYPE },

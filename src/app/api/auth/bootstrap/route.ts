@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
     // "user_login" pairs, written within milliseconds of each other, that forked the audit chain.
     const claim = (filter: "null" | "other") => {
       const q = db.from("org_members").update({ active_session_id: sessionId, active_session_at: new Date().toISOString() }).eq("user_id", user.id);
-      return (filter === "null" ? q.is("active_session_id", null) : q.neq("active_session_id", sessionId)).select("org_id, email");
+      return (filter === "null" ? q.is("active_session_id", null) : q.neq("active_session_id", sessionId).neq("active_session_id", `revoked:${sessionId}`)).select("org_id, email");
     };
     type Claimed = { data: Array<{ org_id: string; email: string | null }> | null };
     const fromNone = await claim("null") as Claimed;

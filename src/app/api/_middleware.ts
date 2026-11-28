@@ -20,6 +20,7 @@ import { resolveSsoMembership, ssoEnforcement, ssoRequiredError } from "@/lib/ss
 import { annotateTrace } from "@/lib/trace";
 import { authBypassEnabled } from "@/lib/authBypass";
 import { getClientIp } from "@/lib/clientIp";
+import { orgRequiresMfa, isMfaEnrolmentPath } from "@/lib/mfaPolicy";
 import crypto from "crypto";
 export { permissionsFor, requirePermission } from "@/lib/permissionResolver";
 
@@ -96,6 +97,11 @@ export function requireRole(
   return null;
 }
 
+/** The path of the request (works for any Request, not only NextRequest). */
+function requestPath(req: { url: string }): string {
+  try { return new URL(req.url, "http://localhost").pathname; } catch { return ""; }
+}
+
 export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
   // ── Demo / local-testing bypass (never in a production runtime: lib/authBypass.ts) ──────────────────────
   if (authBypassEnabled()) {
@@ -170,7 +176,17 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
       return { org_id: "", error: "mfa_required" };
     }
 
+    // ── Organisation-wide two-factor requirement ──────────────────────────
+    // A member with no two-factor (the check above only covers those who have it) is refused when the org requires it, except
+    // on the calls needed to enrol. platform_admin is exempt (break-glass).
+    if (!twoFa?.enabled && member.role !== "platform_admin" && !isMfaEnrolmentPath(requestPath(req)) && await orgRequiresMfa(db, member.org_id)) {
+      return { org_id: "", error: "mfa_enrollment_required" };
+    }
+
     // ── Single active session enforcement ─────────────────────────────────
+    // "revoked:..." is what ending a member's sessions (POST /api/team/sessions) leaves: nothing matches it, tokens without a
+    // session id included, until they sign in again.
+    if (member.active_session_id?.startsWith("revoked:")) return { org_id: "", error: "session_revoked" };
     if (member.active_session_id && tokenSessionId && member.active_session_id !== tokenSessionId) {
       return { org_id: "", error: "session_revoked" };
     }

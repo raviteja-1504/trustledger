@@ -52,6 +52,9 @@ export async function handleSessionError(code: string | undefined): Promise<void
     // Not allowed in with this session (SSO enforced, or the IdP's org refused it): start over on the login page.
     await supabase.auth.signOut();
     fullPageNavigate(`/login?error=${encodeURIComponent(code)}`);
+  } else if (code === "mfa_enrollment_required") {
+    // The organisation requires two-factor and this member has none: send them to switch it on (the page's own calls are exempt).
+    if (!window.location.pathname.startsWith("/profile")) fullPageNavigate("/profile?mfa=required");
   } else if (code === "mfa_required") {
     fullPageNavigate(`/login?step=2fa&next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
   }
