@@ -178,8 +178,10 @@ describe("JS/TS path sensitivity: narrow guards", () => {
     expect(hasSql(withX(`if (!isValid(x)) return;\n${sql("x")}`))).toBe(true);
   });
 
-  it("does NOT recognize a regex test", () => {
-    expect(hasSql(withX(`if (/^\\d+$/.test(x)) { ${sql("x")} }`))).toBe(true);
+  it("recognizes only a FULL-match regex test (anchored, a safe alphabet, no multiline flag)", () => {
+    expect(hasSql(withX(`if (/^\\d+$/.test(x)) { ${sql("x")} }`))).toBe(false);
+    expect(hasSql(withX(`if (/\\d+/.test(x)) { ${sql("x")} }`))).toBe(true);          // unanchored: proves nothing
+    expect(hasSql(withX(`if (/^\\d+$/m.test(x)) { ${sql("x")} }`))).toBe(true);       // /m: ^ and $ match per line
   });
 
   it("does NOT recognize a prefix check", () => {

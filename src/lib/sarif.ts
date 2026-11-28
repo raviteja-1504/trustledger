@@ -15,7 +15,7 @@
  */
 import type { FileIndicator, FixSuggestion } from "@/types";
 import { findingMeta } from "./findingCatalog";
-import { confidenceLevel } from "./confidence";
+import { confidenceLevel, confidenceReason } from "./confidence";
 import { isActive } from "./findingLifecycle";
 import { buildFindingReport, reportAsPlainText, partsToText, type FindingReport } from "./findingReport";
 
@@ -128,6 +128,7 @@ export function buildSarifReport(
           "trustledger/evidence": reportAsPlainText(r),
           ...(ind.confidence != null ? { "trustledger/confidence": ind.confidence } : {}),
           ...(() => { const lvl = confidenceLevel({ confidence: ind.confidence, sourceExpr: ind.sourceExpr, sourceAssumed: ind.flow?.source.assumed }); return lvl ? { "trustledger/confidenceLevel": lvl } : {}; })(),
+          ...(() => { const why = confidenceReason(ind); return why ? { "trustledger/confidenceReason": why } : {}; })(),
           ...(ind.introduced != null ? { "trustledger/introducedByPR": ind.introduced } : {}),
           // Canonical data-flow evidence (dataFlowEvidence.ts): the exact sink and argument, and a sink identity
           // stable across files -- the same sink reported from two files shares it.

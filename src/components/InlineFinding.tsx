@@ -7,7 +7,7 @@ import type { CrossFileMark } from "@/lib/dataFlowEvidence";
 import { cweFor } from "@/lib/cweMap";
 import { findingMeta } from "@/lib/findingCatalog";
 import { FindingStatusChip, FindingTriagePanel, isSuppressedFinding, useCanShowTriage } from "./FindingTriage";
-import { confidenceLevel, CONFIDENCE_LABEL, CONFIDENCE_DESC } from "@/lib/confidence";
+import { confidenceLevel, confidenceReason, CONFIDENCE_LABEL, CONFIDENCE_DESC } from "@/lib/confidence";
 import { REACH_DESC, REACH_LABEL, URGENCY_DESC, URGENCY_LABEL } from "@/lib/signalClassification";
 
 export interface FindingMeta { label?: string; desc?: string; security?: boolean }
@@ -313,6 +313,7 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
   const [triageOpen, setTriageOpen] = useState(false);
   const showTriage = useCanShowTriage(ind);
   const conf = confidenceLevel({ confidence: ind.confidence, sourceExpr: ind.sourceExpr, sourceAssumed: ind.flow?.source.assumed });
+  const why = confidenceReason(ind);
   const suppressed = isSuppressedFinding(ind);
   const ev = useMemo(() => buildFindingEvidence(ind, filePath, siblings), [ind, filePath, siblings]);
   const sev = normSev(ind.severity);
@@ -347,7 +348,7 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
           </div>
           <span className="flex flex-wrap items-center gap-1.5">
             <span className={`${CHIP} ${ev.isDataFlow ? "bg-sky-500/10 text-sky-200 ring-sky-400/30" : "bg-white/5 text-slate-300 ring-white/10"}`}
-              title={`${ev.isDataFlow ? "Found by tracing the value through the parsed code" : "Found by matching a code pattern on this line"}${conf ? `. ${CONFIDENCE_LABEL[conf]}: ${CONFIDENCE_DESC[conf]}` : ""}${ind.confidence != null ? ` (${ind.confidence}%)` : ""}`}>
+              title={`${ev.isDataFlow ? "Found by tracing the value through the parsed code" : "Found by matching a code pattern on this line"}${conf ? `. ${CONFIDENCE_LABEL[conf]}: ${CONFIDENCE_DESC[conf]}` : ""}${ind.confidence != null ? ` (${ind.confidence}%)` : ""}${why ? ` Why: ${why}` : ""}`}>
               {ev.analysisLabel}{conf ? ` · ${CONFIDENCE_LABEL[conf]}` : ""}
             </span>
             {ind.introduced != null && (

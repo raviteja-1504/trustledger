@@ -33,10 +33,10 @@ import {
   type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
   type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
-import { sanitizerClears } from "./taint/sanitizers";
+import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { propagatorNames } from "./taint/models/propagators";
 import { sinkModelFor } from "./taint/models/sinks";
-import { charClassClears, removesLineBreaks } from "./taint/charClass";
+import { anchoredPatternClears, charClassClears, removesLineBreaks } from "./taint/charClass";
 import { hasNestedQuantifier } from "./taint/regexShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
@@ -744,6 +744,39 @@ function replaceClears(call: ts.CallExpression): number {
   return negated && rep.text === "" ? charClassClears(negated[1]) ?? 0 : 0;
 }
 
+/**
+ * Is every non-literal part of a pattern passed through the standard regex-escape, so it can only match literally?
+ * Recognised: `x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")` (any replacement that puts a backslash before `$&`), and calls named
+ * escapeRegExp / escapeRegex / escapeStringRegexp / RegExp.escape. A template or `+` concatenation is escaped when each substitution is.
+ */
+function isRegexEscaped(e: ts.Expression): boolean {
+  const u = unwrapExpr(e);
+  if (ts.isStringLiteralLike(u) || ts.isNumericLiteral(u)) return true;
+  if (ts.isTemplateExpression(u)) return u.templateSpans.every(s => isRegexEscaped(s.expression));
+  if (ts.isBinaryExpression(u) && u.operatorToken.kind === ts.SyntaxKind.PlusToken) return isRegexEscaped(u.left) && isRegexEscaped(u.right);
+  if (!ts.isCallExpression(u)) return false;
+  const callee = u.expression;
+  const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isIdentifier(callee) ? callee.text : "";
+  if (/^(?:escapeRegExp|escapeRegex|escapeStringRegexp|escapeRegexp)$/i.test(name)) return true;
+  if (ts.isPropertyAccessExpression(callee) && name === "escape" && callee.expression.getText() === "RegExp") return true;
+  if (name !== "replace" && name !== "replaceAll") return false;
+  const [pat, rep] = u.arguments;
+  if (!pat || !rep || !ts.isRegularExpressionLiteral(pat) || !ts.isStringLiteralLike(rep)) return false;
+  const body = /^\/([\s\S]*)\/([a-z]*)$/.exec(pat.text);
+  // the class must cover every character that makes a pattern (* + ? ( ) [ ] { } | . ^ $ \) and the replacement must keep the match behind a backslash
+  return !!body && body[2].includes("g") && ["*", "+", "?", "(", ")", "[", "]", "{", "}", "|", ".", "^", "$", "\\\\"].every(c => body[1].includes(c)) &&
+    rep.text === "\\$&";
+}
+
+/**
+ * A redirect target that begins with literal `/x` (a slash, then not another slash or a backslash) is a path on this site: whatever is appended
+ * after it (a query string, more path) cannot change the host. `//host`, `/\host` and `/${v}` (v could start with a slash) are not.
+ */
+function isSameSitePath(e: ts.Expression): boolean {
+  const first = decomposeConcatExpr(e)[0];
+  return !!first && first.kind === "literal" && /^\/[^/\\]/.test(first.text);
+}
+
 /** `require("child_process").exec`: the module a callee is read straight off, without a binding. */
 function inlineRequireModule(callee: ts.Expression): string | null {
   if (!ts.isPropertyAccessExpression(callee)) return null;
@@ -944,6 +977,7 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     return call.arguments[0] ? { id: "path-traversal", sinkExpr: text, args: [call.arguments[0]] } : null;
   }
   if (text === "RegExp" && call.arguments[0]) {
+    if (isRegexEscaped(call.arguments[0])) return null;   // escaped first: it can only match literally
     return { id: "redos", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (parts.length > 1 && NOSQL_TAILS.has(tail) && call.arguments[0] && !isFunctionExpr(call.arguments[0]) &&
@@ -2003,6 +2037,20 @@ function guardsOfCondition(cond: ts.Expression, sf: ts.SourceFile): Guard[] {
         ["isInteger", "isFinite", "isSafeInteger"].includes(callee.name.text) && arg && ts.isIdentifier(arg)) {
       return [{ name: arg.text, holds: "true" }];
     }
+    // /^[a-z0-9_]+$/i.test(x): a full match of an anchored pattern confines x to that alphabet (what it clears is judged by the pattern)
+    if (ts.isPropertyAccessExpression(callee) && callee.name.text === "test" && ts.isRegularExpressionLiteral(unwrapExpr(callee.expression)) &&
+        arg && ts.isIdentifier(arg) && cond.arguments.length === 1) {
+      const parts = /^\/([\s\S]*)\/([a-z]*)$/.exec(unwrapExpr(callee.expression).getText(sf));
+      // the `m` flag lets ^ and $ match at every line break: "ok\n' OR 1=1" would pass a check that looks anchored
+      const clears = !parts || parts[2].includes("m") ? null : anchoredPatternClears(parts[1]);
+      if (clears) return [{ name: arg.text, holds: "true", clears }];
+    }
+    // validator.js: isUUID / isInt / isNumeric / isAlphanumeric ... (x) -- the value is a number, a UUID or letters and digits only
+    if (arg && ts.isIdentifier(arg) && /^(?:isUUID|isInt|isNumeric|isFloat|isAlphanumeric|isAlpha|isHexadecimal|isMongoId|isBoolean)$/.test(
+        ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isIdentifier(callee) ? callee.text : "") &&
+        (ts.isIdentifier(callee) || (ts.isPropertyAccessExpression(callee) && /^(?:validator|v)$/.test(callee.expression.getText(sf))))) {
+      return [{ name: arg.text, holds: "true", clears: NUMERIC_CLEARS }];
+    }
     // isNaN(x) is FALSE for numeric-looking input
     if (ts.isIdentifier(callee) && callee.text === "isNaN" && arg && ts.isIdentifier(arg)) {
       return [{ name: arg.text, holds: "false" }];
@@ -2432,6 +2480,7 @@ function directSinkHit(
       if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr, arg: match.args[0] };
       if (sql.verdict === "safe") positionCleared = match.args[0];
     }
+    if (match.id === "open-redirect" && match.args.length === 1 && isSameSitePath(match.args[0])) positionCleared = match.args[0];
     if (match.id === "command-injection") {
       const argInj = findArgumentInjectionCulprit(n, importMap, x => maskFn(x, env));
       if (argInj) return { id: "argument-injection", sinkExpr: argInj.calleeName, arg: argInj.culprit };
@@ -3276,11 +3325,26 @@ function bolaCallMentionsObject(call: ts.CallExpression, ctx: BolaCtx): boolean 
  * handed: `isOwner(doc, user)` or `can(user, "read", doc)` name the object, so they are ownership-level;
  * `user.role !== "admin"` does not, so it is role-level (a real control, but not proof about THIS object).
  */
+/** Names of guards that throw / respond on refusal when called as a plain statement (assertCanRead, ensureOwner, authorize, requirePermission...). */
+const THROWING_GUARD_VERB_RE = /^(?:assert|ensure|require|authori[sz]e|check|verify|enforce|must|guard)/i;
+
 function bolaGuardClauseKind(sink: ts.Node, ctx: BolaCtx, fnBody: ts.Node, allowAfter: boolean): { kind: AuthzKind; note: string } | null {
   const contains = (outer: ts.Node | undefined, inner: ts.Node) => !!outer && inner.getStart() >= outer.getStart() && inner.getEnd() <= outer.getEnd();
   let best: { kind: AuthzKind; note: string } | null = null;
   const consider = (kind: AuthzKind, note: string) => { if (!best || (kind === "ownership" && best.kind !== "ownership")) best = { kind, note }; };
   const visit = (n: ts.Node) => {
+    // A throwing guard called as a statement: `await assertCanRead(user, doc);` / `authorize(user, "read", doc)` -- no `if`, the call itself refuses.
+    if (ts.isExpressionStatement(n)) {
+      const call = unwrapExpr(n.expression);
+      const c = ts.isAwaitExpression(call) ? unwrapExpr(call.expression) : call;
+      if (ts.isCallExpression(c)) {
+        const before = n.getEnd() <= sink.getStart() && contains(n.parent, sink);
+        const after = allowAfter && n.getStart() >= bolaEnclosingStatement(sink).getEnd() && n.parent === bolaEnclosingStatement(sink).parent;
+        const name = bolaCalleeName(c);
+        const kind = name && (before || after) && THROWING_GUARD_VERB_RE.test(name) ? classifyGuardName(name) : null;
+        if (kind) consider(kind === "role" && bolaCallMentionsObject(c, ctx) ? "ownership" : kind, `${name}(...) guard`);
+      }
+    }
     if (ts.isIfStatement(n) && (bolaStatementTerminates(n.thenStatement) || bolaStatementTerminates(n.elseStatement))) {
       const before = n.getEnd() <= sink.getStart() && contains(n.parent, sink);
       const after = allowAfter && n.getStart() >= bolaEnclosingStatement(sink).getEnd() && n.parent === bolaEnclosingStatement(sink).parent;
@@ -4123,6 +4187,7 @@ export function scanAstTaint(
         if (fact.id === "ssrf" && clientSide) continue;
         for (const a of argsForFact(call.arguments, fact)) {
           if (isFunctionExpr(a)) continue;
+          if (fact.id === "open-redirect" && isSameSitePath(a)) continue;   // a literal same-site path: the host cannot change
           const m = taintMask(a, env);
           if (m & fact.sinkClass) { emitCrossFileSink(call, a, name, info.fromModule, fact); break; }
           if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(call) });
@@ -4174,6 +4239,7 @@ export function scanAstTaint(
         if (fact.id === "ssrf" && clientSide) continue;
         for (const a of argsForFact(call.arguments, fact)) {
           if (isFunctionExpr(a)) continue;
+          if (fact.id === "open-redirect" && isSameSitePath(a)) continue;
           const m = taintMask(a, env);
           if (m & fact.sinkClass) { emitSameFileSink(call, a, name, fact); break; }
           if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(call) });
@@ -4248,6 +4314,7 @@ export function scanAstTaint(
         }
         if (sql.verdict === "safe") { positionCleared = match.args[0]; cleared = true; }
       }
+      if (match.id === "open-redirect" && match.args.length === 1 && isSameSitePath(match.args[0])) { positionCleared = match.args[0]; cleared = true; }
       let taintedArg: ts.Expression | undefined;
       for (const a of match.args) {
         if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe: this operand can't reach the sink through the position this check already cleared
@@ -4294,6 +4361,24 @@ export function scanAstTaint(
         const rets = f ? returnsOf(f) : [];
         return rets.length > 0 && rets.every(r => provenConstantJs(r, depth + 1));
       }
+      // `a ?? "x"`, `a || "x"`, `c ? "x" : "y"`: one of the operands, so constant when every operand is
+      if (ts.isBinaryExpression(u) && (u.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || u.operatorToken.kind === ts.SyntaxKind.BarBarToken)) {
+        return provenConstantJs(u.left, depth + 1) && provenConstantJs(u.right, depth + 1);
+      }
+      if (ts.isConditionalExpression(u)) return provenConstantJs(u.whenTrue, depth + 1) && provenConstantJs(u.whenFalse, depth + 1);
+      // `MAP[key]` / `({ a: "x", b: "y" })[key]`: a lookup in a table of constants returns one of them, whatever the key (the key picks, it never supplies)
+      if (ts.isElementAccessExpression(u) || ts.isPropertyAccessExpression(u)) {
+        let table: ts.Expression = unwrapExpr(u.expression);
+        if (ts.isIdentifier(table)) {
+          const init = initializerOf.get(table.text);
+          const decl = init?.parent;
+          const isConst = !!decl && ts.isVariableDeclaration(decl) && ts.isVariableDeclarationList(decl.parent) && (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+          if (!init || !isConst) return false;
+          table = unwrapExpr(init);
+        }
+        return ts.isObjectLiteralExpression(table) && table.properties.length > 0 &&
+          table.properties.every(p => ts.isPropertyAssignment(p) && provenConstantJs(p.initializer, depth + 1));
+      }
       return false;
     };
 
@@ -4310,7 +4395,7 @@ export function scanAstTaint(
       // new RegExp(userInput): regex injection / ReDoS
       if (ts.isIdentifier(node.expression) && node.expression.text === "RegExp" && node.arguments?.[0]) {
         const a = node.arguments[0];
-        if (taintMask(a, env) & ALL) emit("redos", node, sourceLabel(a), "new RegExp", a);
+        if ((taintMask(a, env) & ALL) && !isRegexEscaped(a)) emit("redos", node, sourceLabel(a), "new RegExp", a);
       }
     };
 
@@ -4477,7 +4562,8 @@ export function scanAstTaint(
       const target = node.left.getText();
       if (/^(?:(?:window|document|self|top)\.)?location(?:\.href)?$/.test(target)) {
         const m = taintMask(node.right, env);
-        if (m & classOf("open-redirect")) emit("open-redirect", node, sourceLabel(node.right), target, node.right);
+        if (isSameSitePath(node.right)) { if (m & classOf("open-redirect")) suppressedOut?.push({ id: "open-redirect", line: lineOf(node) }); }
+        else if (m & classOf("open-redirect")) emit("open-redirect", node, sourceLabel(node.right), target, node.right);
         else if (wasCleared(m, classOf("open-redirect"))) suppressedOut?.push({ id: "open-redirect", line: lineOf(node) });
         return;
       }

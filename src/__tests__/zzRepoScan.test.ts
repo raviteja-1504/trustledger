@@ -20,7 +20,8 @@ function walk(d: string, out: string[]) {
   }
 }
 
-it("scan", () => {
+// A manual harness (SCAN_ROOT=<dir> SCAN_OUT=<file.json>), not part of the suite: it does nothing without both.
+(ROOT && OUT ? it : it.skip)("scan", () => {
   const files: string[] = [];
   walk(ROOT, files);
   const hits: any[] = [];

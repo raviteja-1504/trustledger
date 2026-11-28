@@ -2123,7 +2123,9 @@ function isJsonScriptBlock(lines: string[], idx: number): boolean {
 function isConstantHtml(lines: string[], idx: number): boolean {
   const line = lines[idx] ?? "";
   const onlyConstants = (literal: string) => templateInterpolations(literal).every(e => /^(?:JSON\.stringify\(\s*)?[A-Z][A-Z0-9_]*\s*\)?$/.test(e.trim()));
-  const inline = /__html\s*:\s*(`[^`]*`|"[^"]*"|'[^']*')\s*[,}]/.exec(line);
+  // the literal may run over several lines (a <style> block): read it from this line's __html on
+  const from = line.search(/__html\s*:/);
+  const inline = from >= 0 ? /^__html\s*:\s*(`[^`]*`|"[^"\n]*"|'[^'\n]*')\s*[,}]/.exec(lines.slice(idx, idx + 200).join("\n").slice(from)) : null;
   if (inline) return onlyConstants(inline[1]);
   const named = /__html\s*:\s*([A-Za-z_$][\w$]*)\s*[,}]/.exec(line);
   if (!named) return false;
@@ -4851,9 +4853,26 @@ function findNoSQLInjection(lines: string[]): ScanIndicator[] {
     "User input in MongoDB operator/query — validate with schema and never pass raw $where");
 }
 
+/**
+ * `stack: err.stack` as a field of an object handed to a logger / error reporter (`recordEvent({ ..., data: { stack: err.stack } })`,
+ * `logger.error("x", { stack })`, `Sentry.captureException`): the stack goes to the server's own logs, not to the client. Only when the nearest
+ * call opening above the line is such a logging call -- a response (`NextResponse.json({ stack })`, `res.json(...)`) opened after it is still reported.
+ */
+function isLoggedNotSent(lines: string[], idx: number): boolean {
+  const LOG = /\b(?:recordEvent|captureException|captureMessage|logger\.\w+|log\.\w+|console\.\w+|Sentry\.\w+)\s*\(/;
+  const SEND = /\b(?:NextResponse|Response)\.json\s*\(|\bres(?:ponse)?\.(?:json|send|status|end|write)\s*\(|\breturn\s+(?:json|jsonify)\s*\(/;
+  for (let i = idx; i >= Math.max(0, idx - 10); i--) {
+    const l = lines[i] ?? "";
+    if (SEND.test(l)) return false;
+    if (LOG.test(l)) return true;
+  }
+  return false;
+}
+
 function findVerboseErrors(lines: string[]): ScanIndicator[] {
   return runDetector(lines, VERBOSE_ERROR_RE, "verbose-error", "Verbose Error Disclosure", "medium",
-    "Stack trace or raw error message sent to client — log internally, return generic message");
+    "Stack trace or raw error message sent to client — log internally, return generic message")
+    .filter(f => !isLoggedNotSent(lines, (f.line ?? 1) - 1));
 }
 
 function findGraphQLInjection(lines: string[]): ScanIndicator[] {
