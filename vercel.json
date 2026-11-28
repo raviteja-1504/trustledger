@@ -4,6 +4,9 @@
   "outputDirectory": ".next",
   "installCommand": "npm install",
   "regions": ["iad1"],
+  "crons": [
+    { "path": "/api/cron/pipeline-health", "schedule": "0 3 * * *" }
+  ],
   "redirects": [
     {
       "source": "/((?!api/).*)",

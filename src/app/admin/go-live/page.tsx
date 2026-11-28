@@ -8,6 +8,7 @@
 import { useState, useEffect } from "react";
 import AuthGuard from "@/components/AuthGuard";
 import { useAuth } from "@/lib/auth";
+import { securityContact, PRIMARY_CONTACT } from "@/lib/contacts";
 
 interface CheckResult {
   id:         string;
@@ -62,6 +63,19 @@ function useGoLiveChecks() {
         return "warn";
       })(),
       detail: `NEXT_PUBLIC_APP_URL=${process.env.NEXT_PUBLIC_APP_URL ?? "(not set)"}`,
+    });
+
+    // ── Security contact ───────────────────────────────────────────────────
+    // A published security address is a promise that someone reads it. The shared mailbox is the fallback until the company has its own.
+    const contact = securityContact();
+    results.push({
+      id: "security_contact",
+      category: "Security",
+      name: "Security contact is a monitored mailbox on your own domain",
+      status: contact === PRIMARY_CONTACT ? "warn" : "pass",
+      detail: contact === PRIMARY_CONTACT
+        ? `Still the shared mailbox (${contact}). Set NEXT_PUBLIC_CONTACT_DOMAIN or NEXT_PUBLIC_SECURITY_CONTACT, redeploy, then send a test message and confirm a named person answers within 3 business days (SECURITY.md).`
+        : `Published as ${contact} on /security and /.well-known/security.txt. Confirm someone reads it: send a test message from outside the organisation.`,
     });
 
     // ── API Health ──────────────────────────────────────────────────────────

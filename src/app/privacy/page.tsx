@@ -68,7 +68,7 @@ export default function PrivacyPolicyPage() {
         </Section>
 
         <Section title="5. Data Retention">
-          <p>We retain scan and violation data for as long as your account is active, subject to any retention window you configure in Settings. Attested scans are kept as an immutable audit record and are not deleted, since their purpose is to provide durable proof of review. You can request full deletion of your organisation's account and associated data by contacting us or using the account deletion option in Settings; some records may be retained where we have a legal obligation to do so.</p>
+          <p>We retain scan and violation data for as long as your account is active, subject to any retention window you configure in Settings. Attested scans are kept as an immutable audit record and are not deleted, since their purpose is to provide durable proof of review. You can request full deletion of your organisation's account and associated data by contacting us or using the account deletion option in Settings; deleting an organisation removes its customer data after a waiting period you can cancel, but the audit log, attestations and signed audit checkpoints are immutable evidence by design and are kept against an anonymised organisation record (they can include the email addresses of reviewers), and some records may also be retained where we have a legal obligation to do so. If you need a record removed for a legal reason, contact us and we will assess it.</p>
         </Section>
 
         <Section title="6. Data Security">

@@ -13,6 +13,8 @@
 import crypto from "crypto";
 import { buildAuditHash } from "./scanner";
 import { logger } from "./logger";
+import { notifyOps } from "./opsAlert";
+import { recordEvent } from "./opsEvents";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
 
@@ -170,6 +172,9 @@ async function _writeAuditLogInner(
   // Best-effort by default (callers log events after the fact), but never silent; strict callers -- those that must not
   // proceed without the record, e.g. organisation deletion -- get the failure.
   logger.error("Audit entry not written", { event: "audit_write_failed", org_id: entry.org_id, event_type: entry.event_type, error: lastError });
+  // The audit trail is the product: a write that fails is something the operator must hear about, not only a log line.
+  void recordEvent({ kind: "audit.write_failed", level: "error", message: "A required audit entry could not be written" });
+  void notifyOps("audit_write_failed", { org_id: entry.org_id, event_type: entry.event_type });
   if (strict) throw new Error(`audit_write_failed: ${lastError}`);
 }
 

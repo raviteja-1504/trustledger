@@ -9,6 +9,8 @@
 import crypto from "crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ScanJob } from "@/lib/queue";
+import { notifyOps } from "@/lib/opsAlert";
+import { recordEvent } from "@/lib/opsEvents";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Db = SupabaseClient<any>;
@@ -92,6 +94,11 @@ export async function finishJob(db: Db, orgId: string, jobId: string, attempts: 
       ? { status: "succeeded", result: outcome.result, scan_id: outcome.scan_id ?? null, last_error: null, finished_at: now, updated_at: now }
       : { status: attempts >= MAX_ATTEMPTS ? "dead" : "failed", last_error: outcome.error, finished_at: now, updated_at: now };
     await db.from("scan_jobs").update(patch).eq("id", jobId).eq("org_id", orgId).eq("status", "running");
+    // The dead-letter state is what someone must act on: record it and tell whoever runs the platform.
+    if (!outcome.ok && attempts >= MAX_ATTEMPTS) {
+      void recordEvent({ kind: "scan.job_dead", org_id: orgId, level: "error", message: "A scan job ran out of attempts", data: { job_id: jobId, attempts } });
+      void notifyOps("scan_job_dead", { org_id: orgId, job_id: jobId, attempts });
+    }
   } catch { /* the ledger must never break a scan */ }
 }
 

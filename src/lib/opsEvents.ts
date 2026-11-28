@@ -15,7 +15,8 @@ export type OpsEventKind =
   | "scan.files_fetched" | "scan.completed" | "scan.failed" | "scan.dep_invalidation"
   | "checkrun.updated" | "checkrun.failed"
   | "api.error"
-  | "pipeline.stuck" | "audit.checkpoint_refused";
+  | "pipeline.stuck" | "audit.checkpoint_refused"
+  | "audit.write_failed" | "scan.job_dead" | "integration.gave_up";
 
 export interface OpsEvent {
   kind: OpsEventKind;

@@ -12,6 +12,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { deliverWebhook, type WebhookEvent, type WebhookEventType } from "@/lib/outboundWebhook";
 import { cronAuthorized } from "@/lib/cronAuth";
 import { isRetryable, nextRetryAt } from "@/lib/webhookRetry";
+import { notifyOps } from "@/lib/opsAlert";
 
 const BATCH = 50;
 const CLAIM_MS = 10 * 60_000;   // a claimed row is not picked up again for this long, so overlapping runs do not double-send
@@ -81,7 +82,10 @@ export async function GET(req: NextRequest) {
 
     const retriesDone = row.retry_count + 1;
     const next = isRetryable(result.error) ? nextRetryAt(retriesDone, new Date()) : null;
-    if (!next) gaveUp++;
+    if (!next) {
+      gaveUp++;
+      void notifyOps("integration_gave_up", { org_id: row.org_id, webhook_id: row.webhook_id });
+    }
     await db.from("webhook_failed_deliveries").update({
       retry_count: retriesDone, last_status: result.status_code, last_error: result.error ?? null,
       next_retry_at: next ? next.toISOString() : null, permanently_failed: !next,

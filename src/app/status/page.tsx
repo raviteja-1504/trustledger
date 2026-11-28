@@ -2,6 +2,9 @@
 
 import { useState, useEffect } from "react";
 
+interface Notice { id: string; severity: "info" | "degraded" | "outage"; title: string; body: string; started_at: string; resolved_at: string | null }
+const NOTICE_TONE = { info: "#1d4ed8", degraded: "#b45309", outage: "#be123c" } as const;
+
 interface ServiceStatus {
   name:        string;
   status:      "operational" | "degraded" | "down";
@@ -20,6 +23,7 @@ export default function StatusPage() {
   const [loading,  setLoading]  = useState(true);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const [overallOk, setOverallOk] = useState(true);
+  const [notices,  setNotices]  = useState<Notice[]>([]);
 
   async function check() {
     setLoading(true);
@@ -63,11 +67,16 @@ export default function StatusPage() {
       checks.push({ name:"GitHub API", status:"degraded", message:"Could not reach GitHub" });
     }
 
-    // Static services (would be real checks in production)
-    checks.push({ name:"Webhook Receiver",  status:"operational" });
-    checks.push({ name:"PDF Generator",     status:"operational" });
-    checks.push({ name:"Alert Delivery",    status:"operational" });
-    checks.push({ name:"SLA Monitor (Cron)",status:"operational" });
+    // The platform's own signals (scan queue, audit log, outbound webhooks) and the operator's notices: only real checks are shown.
+    try {
+      const res = await fetch("/api/status");
+      const body = await res.json() as { components: Array<{ key: string; name: string; state: "operational" | "degraded" | "down" }>; notices: Notice[] };
+      // the database row above already reports the database; the rest come from /api/status
+      for (const c of body.components) if (c.key !== "database") checks.push({ name: c.name, status: c.state });
+      setNotices(body.notices ?? []);
+    } catch {
+      checks.push({ name: "Scanning, audit log and webhooks", status: "degraded", message: "Their status could not be read" });
+    }
 
     setServices(checks);
     setOverallOk(checks.every(s => s.status === "operational"));
@@ -88,13 +97,26 @@ export default function StatusPage() {
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold mb-6"
             style={{ background: overall.bg, color: overall.text }}>
             <span className="w-2 h-2 rounded-full" style={{ background: overall.dot }} />
-            {overallOk ? "All systems operational" : "Some systems degraded"}
+            {overallOk && !notices.some(n => !n.resolved_at && n.severity !== "info") ? "All systems operational" : "Some systems degraded"}
           </div>
           <h1 className="text-3xl font-black text-gray-900">TrustLedger Status</h1>
           {checkedAt && (
             <p className="text-sm text-gray-400 mt-2">Last checked {checkedAt.toLocaleTimeString()}</p>
           )}
         </div>
+
+        {/* The operator's notices: what is wrong, since when, and when it was resolved */}
+        {notices.length > 0 && (
+          <div className="space-y-3 mb-6" aria-label="Notices">
+            {notices.map(n => (
+              <div key={n.id} className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-4" style={{ borderLeft: `4px solid ${n.resolved_at ? "#22c55e" : NOTICE_TONE[n.severity]}` }}>
+                <p className="text-sm font-bold text-gray-900">{n.title} <span className="text-xs font-semibold ml-2" style={{ color: n.resolved_at ? "#15803d" : NOTICE_TONE[n.severity] }}>{n.resolved_at ? "Resolved" : n.severity === "outage" ? "Outage" : n.severity === "degraded" ? "Degraded" : "Notice"}</span></p>
+                {n.body && <p className="text-sm text-gray-600 mt-1 whitespace-pre-line">{n.body}</p>}
+                <p className="text-xs text-gray-400 mt-2">Started {new Date(n.started_at).toLocaleString()}{n.resolved_at ? ` · resolved ${new Date(n.resolved_at).toLocaleString()}` : ""}</p>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Services */}
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">

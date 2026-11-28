@@ -13,6 +13,9 @@ import { verifyCheckpointedChain, createCheckpoint } from "@/lib/auditCheckpoint
 const bundleVerifier = require("../../../scripts/verify-audit-bundle.cjs") as { checkChain: (rows: unknown[], orgId: string) => { valid: boolean; reason?: string; broken_at?: number; forked?: boolean; fork_at?: number } };
 
 jest.mock("@/lib/logger", () => ({ logger: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }));
+// a failed audit write records an ops event and alerts the operator (lib/audit.ts); neither is the subject of these tests
+jest.mock("@/lib/opsEvents", () => ({ recordEvent: jest.fn(async () => {}) }));
+jest.mock("@/lib/opsAlert", () => ({ notifyOps: jest.fn(async () => false) }));
 
 const ORG = "org-1";
 const T0 = Date.parse("2026-11-01T00:00:00.000Z");

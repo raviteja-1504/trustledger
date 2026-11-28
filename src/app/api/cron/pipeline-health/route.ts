@@ -1,5 +1,7 @@
 /**
- * Daily pipeline health check (Vercel cron, see vercel.json).
+ * Daily maintenance run: the one Vercel cron in vercel.json (03:00 UTC; Vercel sends Authorization: Bearer <CRON_SECRET>, which is what
+ * cronAuthorized checks). It can also be called by hand with the same header (docs/operations/runbook.md). If it stops running,
+ * retention windows are not applied, old ops_events are not purged and no checkpoints are recorded automatically.
  *
  *  - For each organisation with stuck scans or undelivered webhooks (lib/pipelineHealth.ts), raise one
  *    "pipeline" alert — at most one per organisation per day, so a lasting problem doesn't flood the alerts list.

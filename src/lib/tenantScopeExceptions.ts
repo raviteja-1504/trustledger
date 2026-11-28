@@ -59,6 +59,11 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   // Is this installation already linked to the caller's own org? Read only to decide whether proof of access is needed; the result is compared with the caller's org id.
   { file: "src/app/api/auth/callback/route.ts", table: "github_installations", op: "select", keys: ["installation_id"], why: "credential-lookup" },
   { file: "src/app/api/cron/pipeline-health/route.ts", table: "ops_events", op: "delete", keys: ["created_at"], why: "system-job" },
+  { file: "src/lib/opsStatus.ts", table: "scan_jobs", op: "select", keys: ["status"], why: "platform-admin" },
+  { file: "src/lib/opsStatus.ts", table: "scan_jobs", op: "select", keys: ["status","started_at"], why: "platform-admin" },
+  { file: "src/lib/opsStatus.ts", table: "scan_jobs", op: "select", keys: ["status","updated_at"], count: 2, why: "platform-admin" },
+  { file: "src/lib/opsStatus.ts", table: "ops_events", op: "select", keys: ["kind","created_at"], count: 2, why: "platform-admin" },
+  { file: "src/lib/opsStatus.ts", table: "webhook_failed_deliveries", op: "select", keys: ["permanently_failed","created_at"], why: "platform-admin" },
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_failed_deliveries", op: "select", keys: ["permanently_failed","next_retry_at"], why: "system-job" },
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_failed_deliveries", op: "update", keys: ["id","next_retry_at"], why: "system-job" },
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_failed_deliveries", op: "update", keys: ["id"], why: "system-job", count: 2 },
