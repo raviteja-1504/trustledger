@@ -50,7 +50,7 @@ export type AuditEventType =
   | "data_exported"
   | "evidence_uploaded" | "evidence_deleted"
   | "ai_tool_policy_changed" | "shadow_ai_triaged"
-  | "org_deletion_requested" | "org_deleted"
+  | "org_deletion_requested" | "org_deletion_cancelled" | "org_deletion_started" | "org_deleted"
   | "audit_forks_reviewed";
 
 /**
@@ -67,7 +67,7 @@ export const REQUIRED_AUDIT_EVENTS: ReadonlySet<AuditEventType> = new Set<AuditE
   "api_key_created", "api_key_revoked",
   "policy_change", "ai_tool_policy_changed", "org_settings_changed", "exception_created", "exception_resolved",
   "data_exported",
-  "evidence_deleted", "repo_disabled", "org_deletion_requested", "org_deleted", "audit_forks_reviewed",
+  "evidence_deleted", "repo_disabled", "org_deletion_requested", "org_deletion_cancelled", "org_deletion_started", "org_deleted", "audit_forks_reviewed",
 ]);
 
 export interface AuditEntry {

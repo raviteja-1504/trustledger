@@ -15,7 +15,7 @@ const MIGRATION = path.join(__dirname, "../../../supabase/migrations/20261127_de
 const sql = fs.readFileSync(MIGRATION, "utf8");
 
 /** Immutable evidence, retained on purpose (see the policy comment in the migration). */
-const RETAINED = new Set(["audit_log", "attestations", "audit_checkpoints", "signing_keys"]);
+const RETAINED = new Set(["audit_log", "attestations", "audit_checkpoints", "signing_keys", "org_deletion_requests"]);
 
 const listed = (): string[] => {
   const m = /tbls\s+text\[\]\s*:=\s*ARRAY\[([\s\S]*?)\];/.exec(sql);

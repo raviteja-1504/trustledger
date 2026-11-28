@@ -73,8 +73,13 @@ BEGIN
         END IF;
         remaining  := array_remove(remaining, t);
         progressed := true;
-      EXCEPTION WHEN foreign_key_violation THEN
-        GET STACKED DIAGNOSTICS last_err = MESSAGE_TEXT;   -- something still references it: retry after the others
+      EXCEPTION
+        WHEN foreign_key_violation THEN
+          GET STACKED DIAGNOSTICS last_err = MESSAGE_TEXT;   -- something still references it: retry after the others
+        WHEN undefined_table THEN
+          -- a table from a migration this database never ran holds no data of this organisation: nothing to delete
+          remaining  := array_remove(remaining, t);
+          progressed := true;
       END;
     END LOOP;
     IF NOT progressed THEN
